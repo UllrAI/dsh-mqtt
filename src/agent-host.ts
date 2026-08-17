@@ -113,6 +113,7 @@ export class DshAgentHost implements GatewayAgentHost {
         })
       }
     } catch (error) {
+      if (error instanceof AgentHostError) throw error
       throw new AgentHostError(
         requestedSessionId === undefined ? 'AGENT_CREATE_FAILED' : 'SESSION_RESUME_FAILED',
         error instanceof Error ? error.message : String(error),

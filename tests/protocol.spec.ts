@@ -85,6 +85,10 @@ describe('protocol parsing', () => {
     [bytes(submit({ input: '' })), 'INVALID_MESSAGE'],
     [bytes(submit({ input: 'x'.repeat(101) })), 'MESSAGE_TOO_LARGE'],
     [bytes(submit({ metadata: { data: 'x'.repeat(300) } })), 'METADATA_TOO_LARGE'],
+    [bytes(submit({ timestamp: 'not-a-date' })), 'INVALID_TIMESTAMP'],
+    [bytes(submit({ type: 'request.cancel' })), 'INVALID_MESSAGE_TYPE'],
+    [bytes(submit({ session_id: 'bad/session' })), 'INVALID_SESSION_ID'],
+    [Buffer.alloc(4_097, 1), 'MESSAGE_TOO_LARGE'],
   ])('rejects malformed submit input with %s', (payload, code) => {
     try {
       parseSubmit(payload, limits)
@@ -93,6 +97,32 @@ describe('protocol parsing', () => {
       expect(error).toBeInstanceOf(ProtocolError)
       expect((error as ProtocolError).code).toBe(code)
     }
+  })
+
+  it('rejects malformed control operations', () => {
+    expect(() => parseControl(bytes({
+      version: 1,
+      id: 'req-1',
+      command_id: 'cmd-1',
+      type: 'request.unknown',
+      timestamp: '2026-08-17T12:00:00Z',
+    }), 'req-1', limits)).toThrowError(expect.objectContaining({ code: 'INVALID_MESSAGE_TYPE' }))
+
+    expect(() => parseControl(bytes({
+      version: 1,
+      id: 'req-1',
+      command_id: 'bad/#',
+      type: 'request.cancel',
+      timestamp: '2026-08-17T12:00:00Z',
+    }), 'req-1', limits)).toThrowError(expect.objectContaining({ code: 'INVALID_COMMAND_ID' }))
+
+    expect(() => parseControl(bytes({
+      version: 1,
+      id: 'req-1',
+      command_id: 'cmd-2',
+      type: 'request.inject',
+      timestamp: '2026-08-17T12:00:00Z',
+    }), 'req-1', limits)).toThrowError(expect.objectContaining({ code: 'INVALID_MESSAGE' }))
   })
 })
 

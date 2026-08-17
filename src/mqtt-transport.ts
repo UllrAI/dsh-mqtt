@@ -58,14 +58,30 @@ export class MqttTransport implements GatewayTransport {
 
     const client = connect(config.url, clientOptions)
     this.client = client
+    const messageTasks = new WeakMap<object, Promise<void>>()
     client.on('message', (topic, payload, packet) => {
-      handlers.onMessage({
+      const message = {
         topic,
         payload: Buffer.from(payload),
         qos: packet.qos,
         retain: packet.retain,
-      })
+      } as const
+      const task = Promise.resolve().then(() => handlers.onMessage(message))
+      messageTasks.set(packet, task)
     })
+    client.handleMessage = (packet, callback): void => {
+      const task = messageTasks.get(packet) ?? Promise.resolve()
+      void task.then(
+        () => {
+          messageTasks.delete(packet)
+          callback()
+        },
+        (error: unknown) => {
+          messageTasks.delete(packet)
+          callback(error instanceof Error ? error : new Error(String(error)))
+        },
+      )
+    }
     client.on('reconnect', () => logger.info('dsh-mqtt: reconnecting to broker'))
     client.on('offline', () => logger.warn('dsh-mqtt: broker connection is offline'))
     client.on('error', error => logger.error('dsh-mqtt: broker error', error))

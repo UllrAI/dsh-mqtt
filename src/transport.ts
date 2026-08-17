@@ -11,7 +11,7 @@ export interface PublishOptions {
 }
 
 export interface TransportHandlers {
-  onMessage(message: IncomingMessage): void
+  onMessage(message: IncomingMessage): void | Promise<void>
   onConnect(): void | Promise<void>
 }
 

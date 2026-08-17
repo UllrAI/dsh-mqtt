@@ -245,8 +245,11 @@ export function protocolResult(
   }
 }
 
-export function protocolErrorResult(error: ProtocolError, fallbackId = 'unknown'): GatewayResult {
-  return protocolResult(error.requestId ?? fallbackId, 'failed', {
+export function protocolErrorResult(
+  error: ProtocolError,
+  requestId = error.requestId ?? 'unknown',
+): GatewayResult {
+  return protocolResult(requestId, 'failed', {
     error: {
       code: error.code,
       message: error.message,

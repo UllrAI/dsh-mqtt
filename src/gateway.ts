@@ -73,9 +73,9 @@ export class MqttAgentGateway {
     }))
 
     this.host.start({
-      onEvent: event => this.enqueue(() => this.handleAgentEvent(event.sessionId, event.event)),
-      onStatus: event => this.enqueue(() => this.handleAgentStatus(event)),
-      onError: event => this.enqueue(() => this.handleAgentError(event)),
+      onEvent: event => { void this.enqueue(() => this.handleAgentEvent(event.sessionId, event.event)) },
+      onStatus: event => { void this.enqueue(() => this.handleAgentStatus(event)) },
+      onError: event => { void this.enqueue(() => this.handleAgentError(event)) },
     })
 
     try {
@@ -87,6 +87,7 @@ export class MqttAgentGateway {
           for (const record of recovered) {
             if (record.result !== undefined) await this.publishResult(record.result)
           }
+          recovered.length = 0
         },
       })
     } catch (error) {
@@ -122,12 +123,16 @@ export class MqttAgentGateway {
     if (failures.length > 1) throw new AggregateError(failures, 'dsh-mqtt gateway shutdown failed')
   }
 
+  async whenIdle(): Promise<void> {
+    await this.operationQueue
+  }
+
   private enqueue(operation: () => void | Promise<void>): Promise<void> {
     const task = this.operationQueue.then(operation)
     this.operationQueue = task.catch(error => {
       this.logger.error('dsh-mqtt: asynchronous gateway operation failed', error)
     })
-    return task
+    return this.operationQueue
   }
 
   private async handleMessage(message: IncomingMessage): Promise<void> {

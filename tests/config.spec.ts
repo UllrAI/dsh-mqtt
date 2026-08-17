@@ -55,4 +55,41 @@ describe('resolveConfig', () => {
       passwordEnv: 'MISSING',
     }, {})).toThrow(/MISSING is not set/)
   })
+
+  it.each([
+    [{ clientId: `bad${String.fromCharCode(0)}id` }, /clientId/],
+    [{ keepaliveSeconds: 0 }, /keepaliveSeconds/],
+    [{ sessionExpirySeconds: -1 }, /sessionExpirySeconds/],
+    [{ maxTokens: 0 }, /maxTokens/],
+    [{ capabilities: ['bad/#'] }, /capability/],
+    [{ workspaces: { 'bad/#': '/tmp' } }, /workspace alias/],
+    [{ workspaces: { app: '' } }, /empty path/],
+  ])('rejects unsafe operational values %#', (overrides, expected) => {
+    expect(() => resolveConfig({
+      url: 'mqtt://localhost',
+      namespace: 'safe',
+      nodeId: 'node',
+      ...overrides,
+    }, {})).toThrow(expected)
+  })
+
+  it('accepts direct credentials and MQTT 3.1.1 configuration', () => {
+    const config = resolveConfig({
+      url: 'ws://localhost:8080/mqtt',
+      namespace: 'safe',
+      nodeId: 'node',
+      protocolVersion: 4,
+      clean: true,
+      username: 'direct-user',
+      password: 'direct-password',
+      reconnectPeriodMs: 0,
+    }, {})
+    expect(config).toMatchObject({
+      protocolVersion: 4,
+      clean: true,
+      username: 'direct-user',
+      password: 'direct-password',
+      reconnectPeriodMs: 0,
+    })
+  })
 })
