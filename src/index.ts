@@ -24,7 +24,7 @@ export { RequestStore } from './state-store.ts'
 export { TopicLayout } from './topics.ts'
 
 export const name = 'dsh-mqtt'
-export const inject = ['agents']
+export const inject = ['agentDefaultModel', 'agents']
 
 function loggerFor(ctx: Context): Logger {
   return {

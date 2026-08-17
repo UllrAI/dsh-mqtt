@@ -9,7 +9,7 @@ describe('DSH plugin export shape', () => {
     const unwrapped = loader.unwrapExports(plugin) as Record<string, unknown>
     expect(unwrapped).toBe(plugin)
     expect(unwrapped.name).toBe('dsh-mqtt')
-    expect(unwrapped.inject).toEqual(['agents'])
+    expect(unwrapped.inject).toEqual(['agentDefaultModel', 'agents'])
     expect(unwrapped.Config).toBeDefined()
     expect(typeof unwrapped.apply).toBe('function')
   })

@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle, CreateAgentOptions, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentHostError, DshAgentHost, type AgentHostHandlers } from '../src/agent-host.ts'
@@ -44,24 +44,28 @@ function fakeAgent(id: string): FakeAgent {
 function fakeContext() {
   const agents = new Map<string, FakeAgent>()
   const listeners = new Map<string, Set<(...args: unknown[]) => void>>()
-  const create = vi.fn(async (options: { sessionId: string }) => {
-    const agent = fakeAgent(options.sessionId)
-    agents.set(options.sessionId, agent)
+  const currentSelection = vi.fn(() => ({ provider: 'profile-provider', model: 'profile-model' }))
+  const create = vi.fn(async (options: CreateAgentOptions) => {
+    const sessionId = String(options.sessionId)
+    const agent = fakeAgent(sessionId)
+    agents.set(sessionId, agent)
     const handle: AgentHandle = {
       agent,
-      dispose: vi.fn(async () => { agents.delete(options.sessionId) }),
+      dispose: vi.fn(async () => { agents.delete(sessionId) }),
     }
     return handle
   })
-  const resume = vi.fn(async (options: { resumeSessionId: string }) => {
-    const agent = fakeAgent(options.resumeSessionId)
-    agents.set(options.resumeSessionId, agent)
+  const resume = vi.fn(async (options: ResumeAgentOptions) => {
+    const sessionId = String(options.resumeSessionId)
+    const agent = fakeAgent(sessionId)
+    agents.set(sessionId, agent)
     return {
       agent,
-      dispose: vi.fn(async () => { agents.delete(options.resumeSessionId) }),
+      dispose: vi.fn(async () => { agents.delete(sessionId) }),
     } satisfies AgentHandle
   })
   const context = {
+    agentDefaultModel: { currentSelection },
     agents: {
       get: (id: string) => agents.get(id),
       create,
@@ -78,6 +82,7 @@ function fakeContext() {
     context,
     agents,
     create,
+    currentSelection,
     resume,
     emit(name: string, ...args: unknown[]) {
       for (const listener of listeners.get(name) ?? []) listener(...args)
@@ -87,7 +92,7 @@ function fakeContext() {
 
 const directories: string[] = []
 
-async function setup() {
+async function setup(useProfileModel = false) {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-mqtt-agent-host-'))
   directories.push(directory)
   const config = resolveConfig({
@@ -96,8 +101,7 @@ async function setup() {
     nodeId: 'node',
     workspaces: { app: directory },
     defaultWorkspace: 'app',
-    provider: 'deepseek-official',
-    model: 'deepseek-chat',
+    ...useProfileModel ? {} : { provider: 'deepseek-official', model: 'deepseek-chat' },
     maxTokens: 2_048,
   })
   const fake = fakeContext()
@@ -128,6 +132,7 @@ describe('DshAgentHost', () => {
         model: 'deepseek-chat',
         maxTokens: 2_048,
       },
+      setup: expect.any(Function),
     })
 
     const agent = fixture.fake.agents.get(lease.sessionId) as FakeAgent
@@ -163,7 +168,22 @@ describe('DshAgentHost', () => {
     expect(fixture.fake.resume).toHaveBeenCalledWith({
       resumeSessionId: 'persisted-session',
       agentOptions: fixture.config.agentOptions,
+      setup: expect.any(Function),
     })
+  })
+
+  it('uses the profile default model when no explicit model override is configured', async () => {
+    const fixture = await setup(true)
+    await fixture.host.acquire({ requestId: 'default-model', workspace: 'app' })
+    expect(fixture.fake.currentSelection).toHaveBeenCalledOnce()
+    expect(fixture.fake.create).toHaveBeenCalledWith(expect.objectContaining({
+      agentOptions: {
+        provider: 'profile-provider',
+        model: 'profile-model',
+        maxTokens: 2_048,
+      },
+      setup: expect.any(Function),
+    }))
   })
 
   it('forwards only live DSH lifecycle events while started', async () => {

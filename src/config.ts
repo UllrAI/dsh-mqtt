@@ -201,6 +201,9 @@ export function resolveConfig(config: Config, env: NodeJS.ProcessEnv = process.e
 
   const maxTokens = config.maxTokens
   if (maxTokens !== undefined) positiveInteger(maxTokens, 'maxTokens')
+  if ((config.provider === undefined) !== (config.model === undefined)) {
+    throw new Error('dsh-mqtt: provider and model must be configured together')
+  }
   const capabilities = [...new Set(config.capabilities ?? [])].map(value => topicSegment(value, 'capability'))
   const username = optionalSecret(config.username, config.usernameEnv, 'username', env)
   const password = optionalSecret(config.password, config.passwordEnv, 'password', env)

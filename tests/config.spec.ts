@@ -62,6 +62,8 @@ describe('resolveConfig', () => {
     [{ keepaliveSeconds: 0 }, /keepaliveSeconds/],
     [{ sessionExpirySeconds: -1 }, /sessionExpirySeconds/],
     [{ maxTokens: 0 }, /maxTokens/],
+    [{ provider: 'deepseek-official' }, /provider and model/],
+    [{ model: 'deepseek-chat' }, /provider and model/],
     [{ capabilities: ['bad/#'] }, /capability/],
     [{ workspaces: { 'bad/#': '/tmp' } }, /workspace alias/],
     [{ workspaces: { app: '' } }, /empty path/],

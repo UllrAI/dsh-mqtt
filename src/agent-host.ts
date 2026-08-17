@@ -1,7 +1,15 @@
 import { randomUUID } from 'node:crypto'
 import { stat } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
-import type { Agent, AgentHandle, AgentStatus } from '@deepseek-ai/dsh-agent'
+import {
+  installModelSelection,
+  type Agent,
+  type AgentHandle,
+  type AgentOptions,
+  type AgentSetup,
+  type AgentStatus,
+  type ModelSelection,
+} from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ResolvedConfig } from './config.ts'
@@ -40,6 +48,10 @@ export interface AcquireAgentOptions {
 export interface AgentLease {
   sessionId: string
   owned: boolean
+}
+
+interface AgentDefaultModel {
+  currentSelection(): ModelSelection
 }
 
 export interface GatewayAgentHost {
@@ -103,19 +115,28 @@ export class DshAgentHost implements GatewayAgentHost {
     const existingOwned = this.owned.get(sessionId)
     if (existingOwned !== undefined) return { sessionId, owned: true }
 
+    const selection = this.modelSelection()
+    const agentOptions: AgentOptions = {
+      provider: selection.provider,
+      model: selection.model,
+      ...this.config.agentOptions.maxTokens === undefined ? {} : { maxTokens: this.config.agentOptions.maxTokens },
+    }
+    const setup = this.modelSetup(selection)
     let handle: AgentHandle
     try {
       if (requestedSessionId !== undefined) {
         handle = await this.ctx.agents.resume({
           resumeSessionId: id,
-          agentOptions: this.config.agentOptions,
+          agentOptions,
+          setup,
         })
       } else {
         const cwd = await this.resolveWorkspace(options.workspace)
         handle = await this.ctx.agents.create({
           sessionId: id,
           meta: { cwd },
-          agentOptions: this.config.agentOptions,
+          agentOptions,
+          setup,
         })
       }
     } catch (error) {
@@ -194,5 +215,27 @@ export class DshAgentHost implements GatewayAgentHost {
 
   private assertStarted(): void {
     if (!this.started) throw new Error('dsh-mqtt agent host is not started')
+  }
+
+  private modelSelection(): ModelSelection {
+    const { provider, model } = this.config.agentOptions
+    if (provider !== undefined && model !== undefined) return { provider, model }
+    return (this.ctx as Context & { agentDefaultModel: AgentDefaultModel }).agentDefaultModel.currentSelection()
+  }
+
+  private modelSetup(fallback: ModelSelection): AgentSetup {
+    return agentCtx => {
+      const agent = agentCtx.agent
+      if (agent === undefined) throw new Error('dsh-mqtt: agent setup has no scoped agent')
+      const logged = agent.session.requestHeader()?.config
+      const current: ModelSelection = logged === undefined
+        ? fallback
+        : {
+            provider: logged.provider,
+            model: logged.model,
+            ...logged.reasoningEffort === undefined ? {} : { reasoningEffort: logged.reasoningEffort },
+          }
+      installModelSelection(agentCtx, { current, assembled: undefined })
+    }
   }
 }
