@@ -1,541 +1,539 @@
 # dsh-mqtt
 
-> MQTT protocol driver and agent worker gateway for DSH.
+English | [中文](README.zh.md)
 
-`dsh-mqtt` turns a DSH instance into an MQTT-addressable agent worker. Software that can connect to an MQTT broker can submit work, stream execution events, steer or cancel a running agent, and receive a correlated final result—without exposing the DSH host through a public HTTP server.
+MQTT protocol driver and agent worker gateway for [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness).
 
-This project is currently in the **design stage**. No working plugin has been released yet. This README defines the intended product boundary and the initial protocol so development can start from a shared contract.
+`dsh-mqtt` turns a DSH process into an MQTT-addressable agent worker. A client can submit work, observe normalized execution events, steer or inject context into a running turn, cancel it, and receive a correlated final result. The DSH host only makes an outbound broker connection, so the worker can stay behind NAT or a firewall without exposing an HTTP server.
 
-## What this project is
+> [!IMPORTANT]
+> This project is pre-release and currently targets DSH `0.1.0-rc.7`. DSH itself is a developer preview and may introduce breaking changes. The package has not yet been published to npm; use the local-checkout or GitHub installation below.
 
-`dsh-mqtt` is a long-running DSH host plugin, not merely an `mqtt_publish` or `mqtt_subscribe` model tool.
+## What it provides
 
-It acts as an external protocol driver:
+- MQTT 3.1.1 and 5 connections over TCP, TLS, WebSocket, or secure WebSocket;
+- persistent MQTT sessions, reconnect, retained presence, and Last Will;
+- node-scoped `submit`, `steer`, `inject`, and `cancel` commands;
+- DSH agent creation and controlled Session continuation;
+- normalized `session/event`, agent status, and agent error output;
+- QoS 1 request and control deduplication across reconnects and restarts;
+- durable terminal results and interrupted-request recovery;
+- workspace aliases instead of caller-supplied filesystem paths;
+- active-request and payload limits;
+- safe event exposure by default, with explicit full-event opt-in;
+- an ACL-friendly, versioned topic layout.
 
-```text
-Application / CI / SaaS / another agent
-                   │
-             MQTT request
-                   │
-                   ▼
-              MQTT broker
-                   │
-                   ▼
-            dsh-mqtt gateway
-                   │
-          create or resume session
-                   │
-        followup / steer / inject / cancel
-                   │
-                   ▼
-               DSH agent
-                   │
-       session events and final result
-                   │
-                   ▼
-              MQTT broker
-                   │
-                   ▼
-                 Client
-```
+This is a long-running host plugin, not an `mqtt_publish` or `mqtt_subscribe` model tool. The MQTT subscription lives with the DSH process and wakes or controls Agents when messages arrive.
 
-The gateway owns the long-lived MQTT subscription and maps incoming messages to DSH's agent lifecycle. Agent output is observed through DSH session events and published back to MQTT. A model invocation never blocks while waiting inside an MQTT subscribe tool.
+## When to use it
 
-## Why MQTT
+Good fits include:
 
-MQTT is useful here because it provides a lightweight, bidirectional, asynchronous transport between software and agent workers.
+- invoking a workstation or private server from CI or a cloud service;
+- running small fleets of DSH workers with local repositories, credentials, browsers, or GPUs;
+- asynchronous automation where the producer and worker should not maintain a direct connection;
+- simple software-to-Agent or Agent-to-Agent event integration.
 
-- **Works behind NAT and firewalls.** A DSH host only needs an outbound connection to the broker.
-- **Bidirectional over one connection.** Commands flow to the worker while events and results flow back.
-- **Offline-friendly delivery.** Persistent sessions and QoS 1 can preserve commands while a worker temporarily reconnects, subject to broker configuration and message expiry.
-- **Routing and fan-out.** Topics can address a node, a group of workers, a project, or a workload class.
-- **Presence.** Retained status messages and MQTT Last Will provide online/offline discovery without a separate heartbeat service.
+It is not intended to replace a synchronous HTTP API, a general MQTT client tool, or a workflow/job system with visibility timeouts, priority queues, dependency graphs, dead-letter processing, or exactly-once execution.
 
-MQTT is not intended to replace a normal synchronous HTTP or RPC API. If a caller only needs to send one request and wait on the same connection for one response, HTTP is usually simpler.
-
-## Primary use cases
-
-### Remote agents behind NAT
-
-A cloud service, phone, or CI job can invoke DSH on a workstation or private server without opening an inbound port, configuring a reverse proxy, or assigning a public IP.
-
-This is useful when the worker needs resources that already exist on that machine:
-
-- source repositories and local workspaces;
-- development tools and IDE integrations;
-- private credentials and enterprise network access;
-- GPUs, browsers, or other machine-specific capabilities.
-
-### Lightweight agent worker pools
-
-Multiple DSH nodes can consume a workload through MQTT shared subscriptions:
+## How it works
 
 ```text
-$share/coders/dsh/v1/acme/workloads/coding
+client / CI / SaaS
+        │ request.submit (MQTT)
+        ▼
+   MQTT broker
+        │
+        ▼
+ dsh-mqtt gateway ── create/resume ──► DSH Agent
+        ▲                                  │
+        └──── events / terminal result ────┘
 ```
 
-This can support small worker fleets for coding, review, browser automation, document processing, media generation, or other agent workloads.
+The implementation uses DSH's public Agent and event surfaces:
 
-The project does **not** aim to turn MQTT into a full distributed job system. Workloads requiring visibility timeouts, priority queues, dependency graphs, advanced scheduling, dead-letter processing, or strong exactly-once semantics should use a purpose-built queue or workflow engine.
+- `ctx.agents.create()` and `ctx.agents.resume()`;
+- `ctx.agentDefaultModel.currentSelection()` and Agent-scoped model selection;
+- `agent.followup()`, `agent.steer()`, `agent.inject()`, and `agent.cancel()`;
+- `session/event`, `agent/status`, and `agent/error`.
 
-### Asynchronous automation hooks
+It does not depend on DSH Web UI internals.
 
-CI systems and SaaS products can publish work in response to events such as a pull request, monitoring alert, support request, or database change. Producers do not need to know the agent's IP address or whether it is connected at the moment the event occurs.
+## Quick start
 
-### Simple agent-to-agent events
+### Prerequisites
 
-Agents may publish and consume coarse-grained events such as `research.completed` or `review.failed`. This is appropriate for loose coordination, not for encoding a complex workflow whose state exists only across MQTT topics.
+- Node.js `^22.19.0` or `>=24`;
+- `pnpm` on `PATH` (DSH forwards plugin management to pnpm);
+- a DSH provider credential, for example `DEEPSEEK_API_KEY`;
+- an MQTT broker and a client such as Mosquitto.
 
-## Product boundary
+For a loopback-only development broker:
 
-### MVP
-
-The first usable version should provide:
-
-- MQTT connection management with TLS support and reconnect handling;
-- node-scoped inbound requests;
-- DSH session creation or resumption;
-- `followup`, `steer`, `inject`, and `cancel` control;
-- DSH session-event streaming to MQTT;
-- correlated request, event, and result messages;
-- persistent `request_id` deduplication for QoS 1 delivery;
-- retained node presence using MQTT Last Will;
-- an ACL-friendly, versioned topic convention;
-- configuration for allowed workspaces and protocol limits.
-
-No web UI is required for the MVP.
-
-### Non-goals
-
-The following are explicitly outside the initial scope:
-
-- replacing DSH's HTTP, ACP, or other synchronous interfaces;
-- implementing a general-purpose MQTT client tool for the model;
-- implementing a durable workflow engine or enterprise job scheduler;
-- hiding broker authentication, authorization, or operational concerns;
-- granting unrestricted remote filesystem or workspace access;
-- depending on DSH web UI internals.
-
-## Proposed topic convention
-
-All protocol topics are scoped by protocol version, namespace, and node:
-
-```text
-dsh/v1/{namespace}/nodes/{node_id}/requests
-dsh/v1/{namespace}/nodes/{node_id}/requests/{request_id}/control
-dsh/v1/{namespace}/nodes/{node_id}/requests/{request_id}/events
-dsh/v1/{namespace}/nodes/{node_id}/requests/{request_id}/result
-dsh/v1/{namespace}/nodes/{node_id}/status
+```sh
+mosquitto -p 1883 -v
 ```
 
-Example:
+Mosquitto 2 binds locally when started without a listener configuration. Do not expose an anonymous development broker to another network.
 
-```text
-dsh/v1/ullrai/nodes/mac-mini/requests
-dsh/v1/ullrai/nodes/mac-mini/requests/01JABC123/control
-dsh/v1/ullrai/nodes/mac-mini/requests/01JABC123/events
-dsh/v1/ullrai/nodes/mac-mini/requests/01JABC123/result
-dsh/v1/ullrai/nodes/mac-mini/status
+### Install the plugin
+
+DSH installs plugins into a profile. The `web` profile is convenient for a first run because the normal DSH UI remains available. A dedicated profile such as `mqtt-worker` can be used for unattended deployments.
+
+From a local checkout:
+
+```sh
+git clone https://github.com/UllrAI/dsh-mqtt.git
+cd dsh-mqtt
+npx @deepseek-ai/dsh plugin --profile web add .
 ```
 
-The namespace is part of the security boundary. Deployments should use a tenant, team, or user identifier instead of sharing a global `dsh/#` hierarchy.
+Directly from GitHub:
 
-### Retain and QoS rules
+```sh
+npx @deepseek-ai/dsh plugin --profile web add github:UllrAI/dsh-mqtt
+```
 
-| Topic | Direction | Recommended QoS | Retained |
-| --- | --- | ---: | ---: |
-| `requests` | client → gateway | 1 | **No** |
-| `requests/{id}/control` | client → gateway | 1 | **No** |
-| `requests/{id}/events` | gateway → client | 0 or 1 by event class | No |
-| `requests/{id}/result` | gateway → client | 1 | No |
-| `status` | gateway → client | 1 | **Yes** |
+Git dependencies build through the package `prepare` script. pnpm 10 and later may reject the first installation and print an `allowBuilds` key. Add the exact key from that message under `allowBuilds` in `~/.dsh/profiles/web/pnpm-workspace.yaml` (or `$DSH_HOME/profiles/web/pnpm-workspace.yaml`), then run the command again. A local checkout or built tarball does not need this allowance.
 
-Commands must never be retained. Replaying a retained request after reconnect could repeat a destructive operation. Retained messages are reserved for presence and, in a later version, capability metadata.
+pnpm may also report missing DSH peer dependencies while installing an out-of-tree bundle. The DSH launcher supplies its own matching core packages through the profile fallback at boot; `--dump-config` and the startup check below are the authoritative validation.
 
-Fine-grained streaming deltas may use QoS 0 to reduce overhead. State transitions, errors, and final results should use QoS 1. Clients must still tolerate duplicates and gaps according to the selected event class.
+After a future npm release, the command will be:
 
-## Protocol envelope
+```sh
+npx @deepseek-ai/dsh plugin --profile web add dsh-mqtt
+```
 
-Every request-scoped protocol message uses UTF-8 JSON and includes a small common envelope:
+### Configure the profile
+
+Edit `~/.dsh/profiles/web/cordis.patch.yml`, or the equivalent path below `$DSH_HOME`. The bundle already inserts a row named `mqtt-gateway`; the profile patch replaces that row's complete configuration.
+
+```yaml
+- id: mqtt-gateway
+  config:
+    url: mqtt://127.0.0.1:1883
+    namespace: ullrai
+    nodeId: mac-mini
+
+    workspaces:
+      repo-foo: /absolute/path/to/repo-foo
+    defaultWorkspace: repo-foo
+
+    # Use an absolute path so state does not depend on the launch directory.
+    stateFile: /absolute/path/to/dsh-mqtt-state.json
+
+    capabilities: [coding]
+```
+
+Path fields are resolved by Node.js. `~` and environment variables are not expanded inside these values; use absolute paths. Relative paths are resolved from the directory where DSH is launched.
+
+Inspect the composed profile without booting it:
+
+```sh
+npx @deepseek-ai/dsh --profile web --dump-config
+```
+
+Then start DSH from the desired workspace:
+
+```sh
+export DEEPSEEK_API_KEY='...'
+npx @deepseek-ai/dsh --profile web
+```
+
+The retained status message should appear at:
+
+```sh
+mosquitto_sub -h 127.0.0.1 -q 1 -v \
+  -t 'dsh/v1/ullrai/nodes/mac-mini/status'
+```
+
+### Submit a request
+
+Subscribe before publishing because events and results are deliberately not retained:
+
+```sh
+export BASE='dsh/v1/ullrai/nodes/mac-mini'
+export REQUEST_ID="request-$(date +%s)"
+
+mosquitto_sub -h 127.0.0.1 -q 1 -v \
+  -t "$BASE/requests/$REQUEST_ID/events" \
+  -t "$BASE/requests/$REQUEST_ID/result"
+```
+
+In another terminal, using the same `BASE` and `REQUEST_ID`:
+
+```sh
+export NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+mosquitto_pub -h 127.0.0.1 -q 1 \
+  -t "$BASE/requests" \
+  -m "{\"version\":1,\"id\":\"$REQUEST_ID\",\"type\":\"request.submit\",\"timestamp\":\"$NOW\",\"input\":\"Run the tests and summarize the failures.\",\"workspace\":\"repo-foo\"}"
+```
+
+The gateway publishes `request.accepted`, `request.session`, Agent/session events, and one final `request.result`:
 
 ```json
 {
   "version": 1,
-  "id": "01JABC123",
+  "id": "request-1755417600",
+  "type": "request.result",
+  "timestamp": "2026-08-17T12:04:00.000Z",
+  "status": "completed",
+  "session_id": "mqtt-6a0fe184-bb2a-45d4-941b-e079923b93db",
+  "summary": "All tests passed.",
+  "error": null
+}
+```
+
+## Topic layout
+
+Every topic is scoped by protocol version, namespace, and node:
+
+```text
+dsh/v1/{namespace}/nodes/{nodeId}/requests
+dsh/v1/{namespace}/nodes/{nodeId}/requests/{requestId}/control
+dsh/v1/{namespace}/nodes/{nodeId}/requests/{requestId}/events
+dsh/v1/{namespace}/nodes/{nodeId}/requests/{requestId}/result
+dsh/v1/{namespace}/nodes/{nodeId}/status
+```
+
+Current delivery settings are:
+
+| Topic | Direction | QoS | Retained |
+| --- | --- | ---: | ---: |
+| `requests` | client → gateway | subscribe at 1; publish at 1 recommended | rejected if retained |
+| `requests/{id}/control` | client → gateway | subscribe at 1; publish at 1 recommended | rejected if retained |
+| `requests/{id}/events` | gateway → client | 1 | no |
+| `requests/{id}/result` | gateway → client | 1 | no |
+| `status` | gateway → client | 1 | yes |
+
+The gateway never executes a retained command. Retain is reserved for node presence.
+
+`namespace`, `nodeId`, workspace aliases, request IDs, command IDs, and Session IDs are topic-safe identifiers. Request, command, and Session IDs match:
+
+```text
+[A-Za-z0-9][A-Za-z0-9._:-]{0,127}
+```
+
+## Protocol
+
+Messages are UTF-8 JSON. Request-scoped input contains:
+
+```json
+{
+  "version": 1,
+  "id": "request-01",
   "type": "request.submit",
   "timestamp": "2026-08-17T12:00:00Z"
 }
 ```
 
-- `version` is the integer protocol version.
-- `id` is the request identifier and correlation key.
-- `type` identifies the message schema.
-- `timestamp` is an RFC 3339 UTC timestamp.
+`timestamp` must be a syntactically and calendrically valid RFC 3339 date-time. Version 1 validates its form but does not currently enforce clock skew or a freshness window. Use unguessable, never-reused IDs and broker authentication to prevent replay.
 
-Unknown fields should be ignored within the same protocol version. Unknown message types or unsupported versions should produce a structured error result rather than being executed.
+Unknown fields are ignored within protocol version 1. Unknown types and invalid values are rejected without execution.
 
-## Submit a request
-
-Publish a non-retained message to the node's `requests` topic:
+### Submit
 
 ```json
 {
   "version": 1,
-  "id": "01JABC123",
+  "id": "request-01",
   "type": "request.submit",
   "timestamp": "2026-08-17T12:00:00Z",
-  "input": "Run the tests and fix the failures.",
+  "input": "Upgrade the dependency and run the tests.",
   "workspace": "repo-foo",
-  "session_id": null,
   "metadata": {
-    "source": "github-actions",
+    "source": "ci",
     "pull_request": 42
   }
 }
 ```
 
-Field behavior:
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `version` | yes | Must be `1`. |
+| `id` | yes | Request correlation and deduplication key. |
+| `type` | yes | Must be `request.submit`. |
+| `timestamp` | yes | RFC 3339 date-time. |
+| `input` | yes | Non-empty instruction sent through `agent.followup()`. |
+| `workspace` | for a new Session unless `defaultWorkspace` is set | Configured alias, never an arbitrary path. |
+| `session_id` | no | Continue a permitted DSH Session. |
+| `metadata` | no | Opaque JSON object; size-limited and echoed in `request.accepted`. Do not place secrets in it. |
 
-- `input` is the instruction delivered to the agent.
-- `workspace` is a configured workspace alias, not an arbitrary filesystem path. The gateway resolves aliases through a local allowlist.
-- `session_id` is optional. When absent, the gateway creates a session. When present, the gateway resumes an authorized session and sends a follow-up.
-- `metadata` is opaque correlation data with configured size limits. It must not alter authorization decisions.
+### Control
 
-The default response topics are derived from the request ID. A future optional `reply_to` feature may support client-owned topic roots, but it must be restricted by configuration and ACLs so a publisher cannot make the gateway write to arbitrary broker topics.
+Controls are accepted only while the correlated request is active. Every control needs a unique `command_id` for QoS 1 deduplication.
 
-## Control a running request
-
-Publish control messages to `requests/{request_id}/control`.
-
-### Steer
+Steer the current turn:
 
 ```json
 {
   "version": 1,
-  "id": "01JABC123",
-  "command_id": "01JCTRL001",
+  "id": "request-01",
+  "command_id": "command-01",
   "type": "request.steer",
   "timestamp": "2026-08-17T12:01:00Z",
-  "input": "Focus on the failing integration tests first."
+  "input": "Fix the integration tests first."
 }
 ```
 
-### Inject
+Inject additional input:
 
 ```json
 {
   "version": 1,
-  "id": "01JABC123",
-  "command_id": "01JCTRL002",
+  "id": "request-01",
+  "command_id": "command-02",
   "type": "request.inject",
   "timestamp": "2026-08-17T12:01:10Z",
-  "input": "The staging API is currently unavailable."
+  "input": "The staging service is unavailable."
 }
 ```
 
-### Cancel
+Cancel:
 
 ```json
 {
   "version": 1,
-  "id": "01JABC123",
-  "command_id": "01JCTRL003",
+  "id": "request-01",
+  "command_id": "command-03",
   "type": "request.cancel",
   "timestamp": "2026-08-17T12:02:00Z",
   "reason": "user_cancelled"
 }
 ```
 
-`command_id` uniquely identifies a control operation so duplicate QoS 1 deliveries can be ignored without suppressing later controls for the same request. Control messages are accepted only while the correlated request/session is active and only from a principal authorized for that node and request.
+Publish controls to `requests/{id}/control`. A failed control is not a terminal request result. It produces `request.control.failed` or `request.control.rejected`; retry it with a new `command_id` after addressing the cause.
 
-## Stream events
+### Events
 
-The gateway translates relevant DSH session events into stable protocol events. It should not expose private host objects or make consumers depend directly on DSH's internal event representation.
-
-Example assistant delta:
+All events use this envelope:
 
 ```json
 {
   "version": 1,
-  "id": "01JABC123",
+  "id": "request-01",
   "type": "agent.output.delta",
-  "timestamp": "2026-08-17T12:00:05Z",
+  "timestamp": "2026-08-17T12:00:05.000Z",
   "sequence": 7,
-  "data": {
-    "text": "I found three failing tests..."
-  }
+  "data": { "text": "I found three failing tests..." }
 }
 ```
 
-Expected event classes include:
+Gateway lifecycle events do not have a `sequence`. Normalized DSH Session events preserve the DSH sequence when one is available. Clients must tolerate missing sequence values, duplicates, and gaps.
 
-- request accepted and session assigned;
-- agent status changes;
-- assistant output and streaming deltas;
-- tool start, progress, and completion summaries;
-- approval requested or resolved;
-- cancellation acknowledged;
-- recoverable and terminal errors.
+With the default `eventExposure: safe`:
 
-Secrets, raw credentials, and sensitive tool payloads must be redacted before publication. Remote approval decisions are not part of the initial protocol; approval events are observational until a separate authorization model is defined.
+- visible assistant text is emitted as `agent.output.delta` and `session.assistant/message`;
+- tool calls expose identifiers and tool names, not arguments;
+- tool results expose identifiers and failure state, not result content;
+- reasoning deltas are omitted;
+- unknown Session event payloads are replaced by `{ "redacted": true }`;
+- visible text, usage, and operational error fields are still application data and may be sensitive.
 
-## Final result
+`eventExposure: full` publishes cloned raw DSH event data with a `session.` type prefix. Use it only with trusted subscribers; it can contain prompts, reasoning, tool arguments, tool output, paths, and secrets.
 
-Every accepted request reaches one terminal result: `completed`, `failed`, or `cancelled`.
+### Results and errors
+
+Every accepted request eventually has a stored status of `completed`, `failed`, or `cancelled`. A result contains `error: null` or:
+
+```json
+{
+  "code": "CAPACITY_EXCEEDED",
+  "message": "gateway has reached its active request limit",
+  "retryable": true
+}
+```
+
+Common error codes include `RETAINED_COMMAND`, `REQUEST_ID_CONFLICT`, `CAPACITY_EXCEEDED`, `SESSION_NOT_OWNED`, `SESSION_BUSY`, `WORKSPACE_REQUIRED`, `WORKSPACE_NOT_ALLOWED`, `AGENT_START_FAILED`, `CONTROL_FAILED`, `GATEWAY_RESTARTED`, and `GATEWAY_STOPPED`.
+
+A terminal result describes the Agent request. It does not make tool calls or other external side effects transactional.
+
+## Session continuation
+
+For a new request, the gateway creates a random `mqtt-{uuid}` DSH Session and returns its ID. To continue it, submit a new request ID with that `session_id`:
 
 ```json
 {
   "version": 1,
-  "id": "01JABC123",
-  "type": "request.result",
-  "timestamp": "2026-08-17T12:04:00Z",
-  "status": "completed",
-  "session_id": "session_abc",
-  "summary": "Updated the dependency and fixed the affected tests.",
-  "error": null
+  "id": "request-02",
+  "type": "request.submit",
+  "timestamp": "2026-08-17T12:10:00Z",
+  "input": "Now implement the first fix.",
+  "session_id": "mqtt-6a0fe184-bb2a-45d4-941b-e079923b93db"
 }
 ```
 
-A result indicates the terminal state of the agent request. It does not imply that external side effects are transactionally committed or exactly once.
+By default, only Sessions recorded as created or used by this gateway may be resumed. Their ownership records persist independently of request deduplication expiry.
 
-## Request lifecycle
+`allowExternalSessions: true` permits any broker client with publish access to request a syntactically valid DSH Session ID. MQTT application messages do not carry a trustworthy publisher identity to the plugin, so dsh-mqtt cannot authorize a Session per end user. Enabling this option expands the trust boundary to every principal allowed to publish to that node's request topic. Prefer node/namespace isolation and broker ACLs.
 
-```text
-request.submit
-      │
-      ├─ validate envelope, ACL context, size, and workspace alias
-      │
-      ├─ reserve request_id in persistent deduplication storage
-      │
-      ├─ create or resume an authorized DSH session
-      │
-      ├─ agent.followup(input)
-      │
-      ├─ session/event → normalized MQTT events
-      │
-      └─ completed / failed / cancelled → final MQTT result
-```
+Only one active MQTT request may control a Session at a time.
 
-`steer`, `inject`, and `cancel` are routed to the active agent associated with the request. The request-to-session association remains gateway-owned so callers do not need to understand the complete DSH session model.
+## Presence
 
-## Delivery and idempotency
-
-MQTT QoS 1 is **at least once**, not exactly once. The gateway must assume that submit and control messages can be delivered more than once.
-
-The first release must therefore persist enough information to deduplicate requests across reconnects and process restarts:
-
-- the request ID and normalized request identity;
-- its accepted, active, or terminal state;
-- the associated DSH session ID;
-- the terminal result, when available;
-- processed control `command_id` values for active requests;
-- an expiry time for bounded storage.
-
-On a duplicate `request.submit`:
-
-- if the payload conflicts with the original request, reject it with an ID-conflict error;
-- if the original request is active, do not invoke the agent again;
-- if the original request is terminal, republish or otherwise make the stored result available according to the final protocol behavior.
-
-Deduplication prevents repeated gateway invocation. It cannot guarantee exactly-once effects in tools or external systems used by the agent.
-
-## Node presence
-
-On a successful broker connection, the gateway publishes a retained online status:
+The gateway publishes retained online status after each successful connection:
 
 ```json
 {
   "version": 1,
   "type": "node.status",
-  "timestamp": "2026-08-17T12:00:00Z",
+  "timestamp": "2026-08-17T12:00:00.000Z",
   "node_id": "mac-mini",
   "online": true,
   "gateway_version": "0.1.0",
-  "capabilities": ["coding", "browser"]
+  "capabilities": ["coding"]
 }
 ```
 
-Before connecting, it configures an MQTT Last Will on the same topic:
+It configures a retained offline Last Will on the same topic and explicitly publishes offline status during graceful shutdown. A Last Will timestamp is created when the connection is configured, not when the broker detects the disconnect; use broker receipt time when exact offline timing matters.
 
-```json
-{
-  "version": 1,
-  "type": "node.status",
-  "timestamp": "2026-08-17T12:00:00Z",
-  "node_id": "mac-mini",
-  "online": false
-}
-```
+## Delivery, deduplication, and recovery
 
-The broker publishes the Last Will if the gateway disconnects unexpectedly. On graceful shutdown, the gateway should explicitly publish the offline status before disconnecting.
+MQTT QoS 1 is at least once. dsh-mqtt uses the request payload fingerprint plus `id`, and the control payload fingerprint plus `command_id`, to avoid executing identical redeliveries twice. Reusing an ID with different content is rejected.
 
-Timestamps in a preconfigured Last Will may describe when the connection was established rather than the exact disconnect time. Consumers must use broker receipt time or their own observation time when precise offline timing matters.
+The JSON state file is written through a same-directory temporary file and atomic rename, with file mode `0600` on platforms that support POSIX permissions. It stores:
 
-## Configuration sketch
+- request fingerprints and lifecycle state;
+- request-to-Session associations;
+- control deduplication records;
+- terminal results;
+- Gateway-owned Session IDs.
 
-The exact DSH plugin configuration shape will be finalized during implementation. The intended controls are:
+On startup, an accepted or active request left by a previous process is marked failed with `GATEWAY_RESTARTED`, and its result is published after reconnect. On graceful shutdown, active requests are cancelled and stored as `GATEWAY_STOPPED`.
+
+Terminal request and control records expire after `dedupTtlSeconds` (seven days by default). Session ownership records do not currently expire. Do not reuse request IDs after the TTL: an expired ID is treated as new and may execute again.
+
+Outbound QoS 1 publication returns once MQTT.js has accepted the packet into its outgoing store, rather than waiting indefinitely for a broker acknowledgement. The default MQTT.js outgoing store is in memory. Therefore:
+
+- Agent progress continues while the broker reconnects;
+- live-process reconnects can flush queued packets;
+- a process crash can lose queued events;
+- terminal results remain in the JSON state and can be recovered by resubmitting the identical request with the same ID before its TTL expires;
+- events are not replayed and may have gaps.
+
+For reliable result reception, use a persistent client Session or subscribe before submitting. If a result is missed, subscribe to its result topic and resend the exact original request with the same ID. The gateway republishes a stored terminal result without invoking the Agent again.
+
+## Configuration reference
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `url` | `mqtt://127.0.0.1:1883` | `mqtt`, `mqtts`, `ws`, or `wss` broker URL. |
+| `namespace` | `local` | Topic namespace; 1–64 topic-safe characters. |
+| `nodeId` | `dsh-node` | Node topic segment; 1–64 topic-safe characters. |
+| `clientId` | `dsh-mqtt-{namespace}-{nodeId}` | Stable MQTT client ID. |
+| `protocolVersion` | `5` | `5` for MQTT 5, `4` for MQTT 3.1.1. |
+| `clean` | `false` | MQTT clean-session/start flag. Keep `false` for offline command delivery. |
+| `keepaliveSeconds` | `30` | MQTT keepalive. |
+| `connectTimeoutMs` | `10000` | Initial connection timeout. |
+| `reconnectPeriodMs` | `1000` | Reconnect delay; `0` disables reconnect. |
+| `sessionExpirySeconds` | `86400` | MQTT 5 Session expiry; ignored for MQTT 3.1.1. |
+| `username`, `password` | unset | Direct broker credentials. Avoid storing `password` in a profile. |
+| `usernameEnv`, `passwordEnv` | unset | Environment variable names containing broker credentials. Mutually exclusive with direct values. |
+| `caFile` | unset | Absolute CA bundle path for TLS. |
+| `certFile`, `keyFile` | unset | Client certificate and private key paths for mutual TLS. |
+| `rejectUnauthorized` | `true` | Verify broker TLS certificates. Do not disable in production. |
+| `stateFile` | `.dsh-mqtt/state.json` | Durable deduplication/result/Session-ownership JSON file. |
+| `workspaces` | `{}` | Alias-to-directory allowlist for new Sessions. |
+| `defaultWorkspace` | unset | Alias used when a new request omits `workspace`. |
+| `allowExternalSessions` | `false` | Permit continuation of Sessions not recorded by this gateway. See the security warning above. |
+| `provider`, `model`, `maxTokens` | current DSH profile selection | Optional Agent creation overrides. `provider` and `model` must be set together; otherwise the gateway reads `ctx.agentDefaultModel`. |
+| `capabilities` | `[]` | Informational values published in online presence. |
+| `eventExposure` | `safe` | `safe` normalized events or `full` raw event data. |
+| `maxMessageBytes` | `65536` | Maximum inbound MQTT payload size. |
+| `maxMetadataBytes` | `8192` | Maximum serialized `metadata` size; cannot exceed `maxMessageBytes`. |
+| `maxInputChars` | `32768` | Maximum `input` length in JavaScript characters. |
+| `maxActiveRequests` | `16` | Maximum accepted/active requests. |
+| `dedupTtlSeconds` | `604800` | Terminal request/control retention. |
+
+### Credentials and TLS
+
+Prefer environment-backed credentials:
 
 ```yaml
-mqtt:
-  url: mqtts://broker.example.com:8883
-  client_id: dsh-mac-mini
-  namespace: ullrai
-  node_id: mac-mini
-
-  auth:
-    username_env: DSH_MQTT_USERNAME
-    password_env: DSH_MQTT_PASSWORD
-
-  session:
-    clean: false
-    expiry_seconds: 86400
-
-  limits:
-    max_message_bytes: 65536
-    max_metadata_bytes: 8192
-    dedup_ttl_seconds: 604800
-
-  workspaces:
-    repo-foo: /Users/example/code/foo
-    docs: /Users/example/docs
+- id: mqtt-gateway
+  config:
+    url: mqtts://broker.example.com:8883
+    namespace: ullrai
+    nodeId: mac-mini
+    usernameEnv: DSH_MQTT_USERNAME
+    passwordEnv: DSH_MQTT_PASSWORD
+    caFile: /etc/dsh-mqtt/ca.pem
+    certFile: /etc/dsh-mqtt/client.pem
+    keyFile: /etc/dsh-mqtt/client-key.pem
+    rejectUnauthorized: true
+    stateFile: /var/lib/dsh-mqtt/state.json
+    workspaces:
+      repo-foo: /srv/repos/repo-foo
 ```
 
-Secrets should be read from environment variables or a host secret provider, not committed to configuration files.
+```sh
+export DSH_MQTT_USERNAME='dsh-mac-mini'
+export DSH_MQTT_PASSWORD='...'
+npx @deepseek-ai/dsh --profile web
+```
 
-## Security model
+## Broker ACLs
 
-An MQTT request can cause an agent to use local tools, files, credentials, and network access. Treat the gateway as a remote execution boundary.
+The broker is the principal authentication and authorization boundary. Separate gateway and client credentials and grant only the required direction for one namespace/node.
 
-At minimum, production deployments should enforce:
-
-1. **TLS:** use `mqtts://` and verify the broker certificate.
-2. **Broker authentication:** assign a distinct identity to each gateway and client.
-3. **Per-namespace and per-node ACLs:** clients may publish only to authorized request/control topics and subscribe only to authorized event/result topics.
-4. **Direction-specific ACLs:** clients must not publish fake results or status; gateways must not accept commands from event topics.
-5. **Workspace allowlists:** external requests select configured aliases instead of arbitrary paths.
-6. **Session ownership:** resuming or controlling a session requires authorization beyond merely knowing its ID.
-7. **Input and payload limits:** bound message size, metadata size, active requests, and event throughput.
-8. **Secret redaction:** normalize and filter DSH events before sending them to the broker.
-9. **Audit logging:** record accepted, rejected, controlled, and completed requests without logging secrets.
-10. **Safe broker defaults:** disable anonymous access and broad wildcard grants such as unrestricted `dsh/#` read/write access.
-
-Example ACL intent for a client authorized to use one node:
+Illustrative Mosquitto ACL intent:
 
 ```text
-publish   dsh/v1/ullrai/nodes/mac-mini/requests
-publish   dsh/v1/ullrai/nodes/mac-mini/requests/+/control
-subscribe dsh/v1/ullrai/nodes/mac-mini/requests/+/events
-subscribe dsh/v1/ullrai/nodes/mac-mini/requests/+/result
-subscribe dsh/v1/ullrai/nodes/mac-mini/status
+user dsh-gateway-mac-mini
+topic read  dsh/v1/ullrai/nodes/mac-mini/requests
+topic read  dsh/v1/ullrai/nodes/mac-mini/requests/+/control
+topic write dsh/v1/ullrai/nodes/mac-mini/requests/+/events
+topic write dsh/v1/ullrai/nodes/mac-mini/requests/+/result
+topic write dsh/v1/ullrai/nodes/mac-mini/status
+
+user automation-client
+topic write dsh/v1/ullrai/nodes/mac-mini/requests
+topic write dsh/v1/ullrai/nodes/mac-mini/requests/+/control
+topic read  dsh/v1/ullrai/nodes/mac-mini/requests/+/events
+topic read  dsh/v1/ullrai/nodes/mac-mini/requests/+/result
+topic read  dsh/v1/ullrai/nodes/mac-mini/status
 ```
 
-The gateway uses the inverse direction for those request and response topics. Exact ACL syntax depends on the broker.
+Also use TLS, disable anonymous access, protect the state file and workspace directories, and avoid broad grants such as unrestricted `dsh/#` read/write access. Anyone who can publish to a node can cause its Agent to use the local tools and credentials available to that DSH process.
 
-## Shared subscriptions and worker pools
+## Development
 
-Shared subscriptions are a possible extension for workload-class topics:
-
-```text
-dsh/v1/{namespace}/workloads/{class}
+```sh
+pnpm install
+pnpm lint
+pnpm typecheck
+pnpm test
+pnpm test:coverage
+pnpm build
+pnpm publint
+pnpm check
 ```
 
-Workers in a consumer group could subscribe through:
+`pnpm check` runs lint, TypeScript checking, coverage tests, build, and package export validation. Integration tests start a real in-process Aedes MQTT broker and verify subscription, publication, QoS 1 acknowledgement timing, and Last Will behavior.
 
-```text
-$share/{group}/dsh/v1/{namespace}/workloads/{class}
+To inspect the publishable package:
+
+```sh
+pnpm pack
 ```
 
-This is intentionally separate from the node-addressed MVP. Before enabling worker pools, the protocol must define ownership, offline delivery, rejection, retry, expiry, and what happens when a worker accepts a job and then disappears. MQTT delivery alone does not solve those job semantics.
+The public module exports the Cordis plugin plus `MqttAgentGateway`, `RequestStore`, and `TopicLayout`. `dsh-mqtt/protocol` exports protocol types, parsers, fingerprints, and envelope builders.
 
-## Minimal client flow
+## Current limitations
 
-A client needs only one publish and two subscriptions for a basic request/reply flow:
+- DSH compatibility is pinned to the rapidly changing `0.1.0-rc.7` APIs.
+- The broker must be reachable during plugin startup; automatic reconnect applies after the first successful connection.
+- The implemented protocol is node-addressed. Shared-subscription worker pools and workload-class topics are not implemented.
+- There is no arbitrary `reply_to`; response topics are derived from the request ID.
+- Remote approval and user-question responses are not implemented. Use a DSH surface that can resolve them, or configure unattended workers appropriately.
+- The JSON state store is for one gateway process, not shared multi-process storage.
+- Results and events are not retained; events are not durably replayable.
+- Session ownership entries do not yet have automatic pruning.
+- `safe` event mode is a conservative projection, not a data-loss-prevention system.
+- Deduplication prevents duplicate gateway invocation within its TTL but cannot guarantee exactly-once tool or external side effects.
+- MQTT message expiry, dead-letter queues, priorities, scheduling, and job dependencies are broker/workflow concerns outside this plugin.
 
-```text
-1. Generate a unique request ID.
-2. Subscribe to requests/{id}/events and requests/{id}/result.
-3. Publish request.submit to the node's requests topic with retain=false.
-4. Consume zero or more events.
-5. Stop when the terminal result arrives.
-```
+## License
 
-Illustrative command-line interaction:
-
-```bash
-REQUEST_ID=01JABC123
-BASE=dsh/v1/ullrai/nodes/mac-mini
-
-mosquitto_sub \
-  -h broker.example.com \
-  -t "$BASE/requests/$REQUEST_ID/events" \
-  -t "$BASE/requests/$REQUEST_ID/result"
-
-mosquitto_pub \
-  -h broker.example.com \
-  -q 1 \
-  -t "$BASE/requests" \
-  -m '{"version":1,"id":"01JABC123","type":"request.submit","timestamp":"2026-08-17T12:00:00Z","input":"Run the tests and fix the failures.","workspace":"repo-foo"}'
-```
-
-Authentication and TLS flags are omitted from the example for readability and are required in real deployments.
-
-## DSH integration strategy
-
-The implementation should stay thin and use DSH's public host/plugin abstractions:
-
-- maintain the MQTT connection in the host plugin lifecycle;
-- resolve, create, or resume agents through `ctx.agents`;
-- map inbound input to `followup`, `steer`, `inject`, or `cancel`;
-- observe `session/event` for assistant output, tool activity, status, and errors;
-- translate DSH events into a small, versioned MQTT schema;
-- avoid dependencies on web UI internals.
-
-DSH is currently a developer-preview project and may introduce breaking changes. Keeping the adapter narrow around agent and session primitives reduces the integration surface that must change with DSH.
-
-## Planned development phases
-
-### Phase 1: protocol and single-node gateway
-
-- finalize message schemas and error codes;
-- connect and reconnect to one broker;
-- implement node-addressed submit and result;
-- bridge session events;
-- add steer, inject, and cancel;
-- add persistent request deduplication;
-- add presence and Last Will;
-- test ACL, retained-message, duplicate-delivery, and reconnect behavior.
-
-### Phase 2: operational hardening
-
-- metrics and structured audit logs;
-- backpressure and concurrency limits;
-- event redaction policies;
-- broker interoperability tests;
-- compatibility tests across supported DSH versions;
-- reference clients and deployment examples.
-
-### Phase 3: optional worker pools
-
-- shared workload topics;
-- worker capability advertisement;
-- acceptance, expiry, retry, and orphaned-job semantics;
-- comparison and interoperability guidance for external queue systems.
-
-## Open design questions
-
-The implementation will need explicit decisions on:
-
-- the minimum supported DSH version and stable plugin APIs;
-- the embedded or external persistence mechanism for deduplication;
-- event taxonomy and which event classes use QoS 0 versus QoS 1;
-- result recovery after a client reconnects without using retained results;
-- maximum session lifetime and request-to-session ownership rules;
-- whether constrained client-specific `reply_to` topics are needed;
-- how approval responses should be authenticated if added later;
-- broker support and the MQTT protocol version baseline (3.1.1 versus 5.0).
-
-## Project status
-
-The repository currently documents the proposal only. Interfaces, examples, and schemas may change until the first tagged release.
-
-The next milestone is to validate the DSH plugin lifecycle and session event APIs, turn the protocol examples into machine-checkable schemas, and implement the smallest end-to-end request → agent → result path.
+[MIT](LICENSE) © 2026 UllrAI
