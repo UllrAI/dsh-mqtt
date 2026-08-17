@@ -1,0 +1,8 @@
+- insert:
+    - id: mqtt-gateway
+      name: dsh-mqtt
+      config:
+        url: mqtt://127.0.0.1:1883
+        namespace: local
+        nodeId: dsh-node
+        workspaces: {}
