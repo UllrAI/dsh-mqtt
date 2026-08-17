@@ -1,0 +1,6 @@
+lib/
+node_modules/
+coverage/
+*.tgz
+.dsh-mqtt/
+.DS_Store
