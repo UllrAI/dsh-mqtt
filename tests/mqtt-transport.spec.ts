@@ -188,4 +188,33 @@ describe('MqttTransport integration', () => {
     await late.subscribeAsync(topics.status, { qos: 1 })
     expect(JSON.parse((await retained).payload.toString())).toMatchObject({ online: false, node_id: 'will-worker' })
   })
+
+  it('stops while offline even when a QoS 1 publish is queued', async () => {
+    const fixture = await brokerFixture()
+    const config = resolveConfig({
+      url: fixture.url,
+      namespace: 'integration',
+      nodeId: 'offline-worker',
+      clientId: 'dsh-mqtt-offline-worker',
+      protocolVersion: 4,
+      clean: true,
+      reconnectPeriodMs: 0,
+    })
+    const topics = new TopicLayout(config.namespace, config.nodeId)
+    const transport = new MqttTransport({
+      config,
+      topics,
+      offlineStatus: JSON.stringify({ type: 'node.status', online: false }),
+      logger: logger(),
+    })
+    transports.push(transport)
+    await transport.start({ onMessage: () => undefined, onConnect: () => undefined })
+
+    const internal = transport as unknown as { client: MqttClient }
+    internal.client.stream.destroy()
+    await expect.poll(() => internal.client.connected).toBe(false)
+    await transport.publish(topics.result('queued'), '{"status":"completed"}', { qos: 1 })
+
+    await expect(transport.stop()).resolves.toBeUndefined()
+  })
 })

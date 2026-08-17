@@ -163,6 +163,6 @@ export class MqttTransport implements GatewayTransport {
     this.stopping = true
     this.connectGeneration += 1
     this.client = undefined
-    await client.endAsync(false)
+    await client.endAsync(!client.connected)
   }
 }
