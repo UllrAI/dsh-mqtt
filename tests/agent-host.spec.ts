@@ -119,9 +119,9 @@ describe('DshAgentHost', () => {
   it('creates an agent in an allowlisted workspace and delivers all input modes', async () => {
     const fixture = await setup()
     const lease = await fixture.host.acquire({ requestId: 'req-1', workspace: 'app' })
-    expect(lease).toEqual({ sessionId: 'mqtt-test-node-req-1', owned: true })
+    expect(lease).toEqual({ sessionId: expect.stringMatching(/^mqtt-[0-9a-f-]{36}$/), owned: true })
     expect(fixture.fake.create).toHaveBeenCalledWith({
-      sessionId: 'mqtt-test-node-req-1',
+      sessionId: lease.sessionId,
       meta: { cwd: fixture.directory },
       agentOptions: {
         provider: 'deepseek-official',

@@ -302,7 +302,7 @@ describe('MqttAgentGateway', () => {
   })
 
   it('never executes retained commands and enforces capacity and session exclusivity', async () => {
-    const fixture = await setup({ maxActiveRequests: 1 })
+    const fixture = await setup({ maxActiveRequests: 1, allowExternalSessions: true })
     await inbound(fixture, fixture.gateway.topics.requests, submit('retained'), true)
     expect(lastResult(fixture, 'retained')).toMatchObject({ error: { code: 'RETAINED_COMMAND' } })
     expect(fixture.host.sends).toHaveLength(0)
@@ -319,7 +319,7 @@ describe('MqttAgentGateway', () => {
   })
 
   it('enforces one active MQTT request per resumed session independently of capacity', async () => {
-    const fixture = await setup({ maxActiveRequests: 2 })
+    const fixture = await setup({ maxActiveRequests: 2, allowExternalSessions: true })
     await inbound(fixture, fixture.gateway.topics.requests, submit('first', { session_id: 'shared' }))
     await inbound(fixture, fixture.gateway.topics.requests, submit('second', { session_id: 'shared' }))
     expect(lastResult(fixture, 'second')).toMatchObject({
@@ -327,6 +327,39 @@ describe('MqttAgentGateway', () => {
       error: { code: 'SESSION_BUSY', retryable: true },
     })
     expect(fixture.host.acquisitions).toHaveLength(1)
+  })
+
+  it('rejects arbitrary external sessions but permits sessions previously owned by the gateway', async () => {
+    const fixture = await setup()
+    await inbound(fixture, fixture.gateway.topics.requests, submit('external', { session_id: 'unknown-session' }))
+    expect(lastResult(fixture, 'external')).toMatchObject({
+      status: 'failed',
+      error: { code: 'SESSION_NOT_OWNED', retryable: false },
+    })
+    expect(fixture.host.acquisitions).toHaveLength(0)
+
+    await inbound(fixture, fixture.gateway.topics.requests, submit('original'))
+    fixture.host.event('session-original', {
+      seq: 1,
+      type: 'turn/end',
+      data: { turn: 1, reason: { kind: 'completed' } },
+    })
+    fixture.host.status('session-original', 'idle')
+    await fixture.gateway.whenIdle()
+
+    await inbound(fixture, fixture.gateway.topics.requests, submit('continuation', {
+      session_id: 'session-original',
+      workspace: undefined,
+    }))
+    expect(fixture.host.acquisitions.at(-1)).toEqual({
+      requestId: 'continuation',
+      sessionId: 'session-original',
+    })
+    expect(fixture.host.sends.at(-1)).toEqual({
+      sessionId: 'session-original',
+      action: 'followup',
+      input: 'work for continuation',
+    })
   })
 
   it('rejects missing, mismatched, and conflicting control commands', async () => {
@@ -347,7 +380,11 @@ describe('MqttAgentGateway', () => {
       .toMatchObject({ data: { error: { code: 'COMMAND_ID_CONFLICT' } } })
 
     await inbound(fixture, topic, control('other', 'cmd-2', 'request.cancel'))
-    expect(lastResult(fixture, 'controlled')).toMatchObject({ error: { code: 'REQUEST_ID_MISMATCH' } })
+    expect(publications(fixture, 'request.control.rejected').at(-1)?.value).toMatchObject({
+      id: 'controlled',
+      data: { error: { code: 'REQUEST_ID_MISMATCH' } },
+    })
+    expect((await fixture.store.get('controlled'))?.status).toBe('active')
   })
 
   it('turns agent acquisition and initial delivery failures into durable results', async () => {

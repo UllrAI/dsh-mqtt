@@ -1,7 +1,8 @@
 import { constants } from 'node:fs'
-import { access, chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { access, chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
-import type { GatewayResult } from './protocol.ts'
+import { isRfc3339DateTime, type GatewayResult } from './protocol.ts'
+import { isRequestId } from './topics.ts'
 
 export type StoredStatus = 'accepted' | 'active' | 'completed' | 'failed' | 'cancelled'
 
@@ -25,6 +26,7 @@ export interface StoredRequest {
 interface StateFile {
   version: 1
   requests: Record<string, StoredRequest>
+  sessions: string[]
 }
 
 export type ReserveResult =
@@ -44,29 +46,96 @@ function isTerminal(status: StoredStatus): boolean {
 }
 
 function emptyState(): StateFile {
-  return { version: 1, requests: {} }
+  return { version: 1, requests: Object.create(null) as Record<string, StoredRequest>, sessions: [] }
+}
+
+const STORED_STATUSES = new Set<StoredStatus>(['accepted', 'active', 'completed', 'failed', 'cancelled'])
+
+function plainObject(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value) as unknown
+  return prototype === Object.prototype || prototype === null
+}
+
+function safeTimestamp(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+function assertResult(value: unknown, id: string, status: StoredStatus): GatewayResult {
+  if (!plainObject(value) || value.version !== 1 || value.id !== id || value.type !== 'request.result'
+    || typeof value.timestamp !== 'string' || !isRfc3339DateTime(value.timestamp)
+    || value.status !== status || !isTerminal(status)) {
+    throw new Error(`dsh-mqtt state result for ${JSON.stringify(id)} is invalid`)
+  }
+  if (value.session_id !== undefined && (typeof value.session_id !== 'string' || !isRequestId(value.session_id))) {
+    throw new Error(`dsh-mqtt state result for ${JSON.stringify(id)} has an invalid session id`)
+  }
+  if (value.summary !== undefined && typeof value.summary !== 'string') {
+    throw new Error(`dsh-mqtt state result for ${JSON.stringify(id)} has an invalid summary`)
+  }
+  if (value.error !== null && (!plainObject(value.error) || typeof value.error.code !== 'string'
+    || typeof value.error.message !== 'string' || typeof value.error.retryable !== 'boolean')) {
+    throw new Error(`dsh-mqtt state result for ${JSON.stringify(id)} has an invalid error`)
+  }
+  return value as unknown as GatewayResult
 }
 
 function assertState(value: unknown): StateFile {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+  if (!plainObject(value)) {
     throw new Error('dsh-mqtt state file must contain a JSON object')
   }
   const candidate = value as Partial<StateFile>
-  if (candidate.version !== 1 || candidate.requests === null || typeof candidate.requests !== 'object' || Array.isArray(candidate.requests)) {
+  if (candidate.version !== 1 || !plainObject(candidate.requests)
+    || (candidate.sessions !== undefined && !Array.isArray(candidate.sessions))) {
     throw new Error('dsh-mqtt state file has an unsupported or invalid format')
   }
+  const requests = Object.create(null) as Record<string, StoredRequest>
+  const sessions = new Set<string>()
+  for (const sessionId of candidate.sessions ?? []) {
+    if (typeof sessionId !== 'string' || !isRequestId(sessionId)) {
+      throw new Error('dsh-mqtt state file contains an invalid session id')
+    }
+    sessions.add(sessionId)
+  }
   for (const [id, record] of Object.entries(candidate.requests)) {
-    if (record === null || typeof record !== 'object' || Array.isArray(record)) {
+    if (!isRequestId(id) || !plainObject(record)) {
       throw new Error(`dsh-mqtt state record ${JSON.stringify(id)} is invalid`)
     }
     const row = record as Partial<StoredRequest>
-    if (row.id !== id || typeof row.fingerprint !== 'string' || typeof row.status !== 'string'
-      || typeof row.createdAt !== 'number' || typeof row.updatedAt !== 'number'
-      || typeof row.expiresAt !== 'number' || row.controls === null || typeof row.controls !== 'object') {
+    if (row.id !== id || typeof row.fingerprint !== 'string' || row.fingerprint.length === 0
+      || typeof row.status !== 'string' || !STORED_STATUSES.has(row.status as StoredStatus)
+      || !safeTimestamp(row.createdAt) || !safeTimestamp(row.updatedAt) || !safeTimestamp(row.expiresAt)
+      || !plainObject(row.controls)
+      || (row.sessionId !== undefined && (typeof row.sessionId !== 'string' || !isRequestId(row.sessionId)))) {
       throw new Error(`dsh-mqtt state record ${JSON.stringify(id)} is invalid`)
     }
+    const status = row.status as StoredStatus
+    if (isTerminal(status) !== (row.result !== undefined)) {
+      throw new Error(`dsh-mqtt state record ${JSON.stringify(id)} has inconsistent terminal state`)
+    }
+    const controls = Object.create(null) as Record<string, StoredControl>
+    for (const [commandId, control] of Object.entries(row.controls)) {
+      if (!isRequestId(commandId) || !plainObject(control) || typeof control.fingerprint !== 'string'
+        || control.fingerprint.length === 0 || !safeTimestamp(control.processedAt)) {
+        throw new Error(`dsh-mqtt state control ${JSON.stringify(commandId)} is invalid`)
+      }
+      controls[commandId] = { fingerprint: control.fingerprint, processedAt: control.processedAt }
+    }
+    const normalized: StoredRequest = {
+      id,
+      fingerprint: row.fingerprint,
+      status,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+      expiresAt: row.expiresAt,
+      ...row.sessionId === undefined ? {} : { sessionId: row.sessionId },
+      ...row.result === undefined ? {} : { result: assertResult(row.result, id, status) },
+      controls,
+    }
+    requests[id] = normalized
+    if (normalized.sessionId !== undefined) sessions.add(normalized.sessionId)
   }
-  return candidate as StateFile
+  return { version: 1, requests, sessions: [...sessions] }
 }
 
 function clone<T>(value: T): T {
@@ -116,7 +185,7 @@ export class RequestStore {
         createdAt: now,
         updatedAt: now,
         expiresAt: now + this.ttlMs,
-        controls: {},
+        controls: Object.create(null) as Record<string, StoredControl>,
       }
       this.state.requests[id] = record
       return { kind: 'reserved', record: clone(record) }
@@ -129,6 +198,7 @@ export class RequestStore {
       if (isTerminal(record.status)) throw new Error(`request ${id} is already terminal`)
       record.status = 'active'
       record.sessionId = sessionId
+      if (!this.state.sessions.includes(sessionId)) this.state.sessions.push(sessionId)
       this.touch(record)
       return clone(record)
     })
@@ -172,6 +242,10 @@ export class RequestStore {
 
   async activeCount(): Promise<number> {
     return this.read(() => Object.values(this.state.requests).filter(record => !isTerminal(record.status)).length)
+  }
+
+  async hasSession(sessionId: string): Promise<boolean> {
+    return this.read(() => this.state.sessions.includes(sessionId))
   }
 
   async recoverInterrupted(makeResult: (record: StoredRequest) => GatewayResult): Promise<StoredRequest[]> {
@@ -238,13 +312,14 @@ export class RequestStore {
     await mkdir(directory, { recursive: true, mode: 0o700 })
     const temporary = join(directory, `.${basename(this.file)}.${process.pid}.${Date.now()}.tmp`)
     const bytes = `${JSON.stringify(this.state, null, 2)}\n`
-    await writeFile(temporary, bytes, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
-    await rename(temporary, this.file)
     try {
+      await writeFile(temporary, bytes, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
+      await rename(temporary, this.file)
       await access(this.file, constants.F_OK)
       await chmod(this.file, 0o600)
     } catch (error) {
-      throw new Error(`dsh-mqtt: failed to secure state file ${this.file}`, { cause: error })
+      await rm(temporary, { force: true }).catch(() => undefined)
+      throw new Error(`dsh-mqtt: failed to persist state file ${this.file}`, { cause: error })
     }
   }
 }

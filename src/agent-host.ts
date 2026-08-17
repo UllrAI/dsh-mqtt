@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { stat } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentStatus } from '@deepseek-ai/dsh-agent'
@@ -89,10 +90,15 @@ export class DshAgentHost implements GatewayAgentHost {
   async acquire(options: AcquireAgentOptions): Promise<AgentLease> {
     this.assertStarted()
     const requestedSessionId = options.sessionId
-    const sessionId = requestedSessionId ?? `mqtt-${this.config.namespace}-${this.config.nodeId}-${options.requestId}`
+    const sessionId = requestedSessionId ?? `mqtt-${randomUUID()}`
     const id = SessionId(sessionId)
     const existing = this.ctx.agents.get(id)
-    if (existing !== undefined) return { sessionId, owned: false }
+    if (existing !== undefined) {
+      if (requestedSessionId === undefined) {
+        throw new AgentHostError('SESSION_ID_CONFLICT', 'generated session id is already in use', true)
+      }
+      return { sessionId, owned: false }
+    }
 
     const existingOwned = this.owned.get(sessionId)
     if (existingOwned !== undefined) return { sessionId, owned: true }

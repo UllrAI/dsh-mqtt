@@ -142,6 +142,12 @@ describe('MqttTransport integration', () => {
     const output = nextMessage(client, topic => topic === topics.result('req-1'))
     await transport.publish(topics.result('req-1'), JSON.stringify({ status: 'completed' }), { qos: 1 })
     expect(JSON.parse((await output).payload.toString())).toEqual({ status: 'completed' })
+
+    const eventTopic = topics.events('req-1')
+    await client.subscribeAsync(eventTopic, { qos: 0 })
+    const event = nextMessage(client, topic => topic === eventTopic)
+    await transport.publish(eventTopic, JSON.stringify({ type: 'test.event' }), { qos: 0 })
+    expect(JSON.parse((await event).payload.toString())).toEqual({ type: 'test.event' })
   })
 
   it('publishes its retained Last Will after an ungraceful disconnect', async () => {

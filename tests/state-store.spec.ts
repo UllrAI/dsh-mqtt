@@ -28,6 +28,8 @@ describe('RequestStore', () => {
     expect((await store.reserve('req-1', 'fingerprint-b')).kind).toBe('conflict')
 
     await store.activate('req-1', 'session-1')
+    expect(await store.hasSession('session-1')).toBe(true)
+    expect(await store.hasSession('other-session')).toBe(false)
     expect((await store.claimControl('req-1', 'cmd-1', 'control-a')).kind).toBe('claimed')
     expect((await store.claimControl('req-1', 'cmd-1', 'control-a')).kind).toBe('duplicate')
     expect((await store.claimControl('req-1', 'cmd-1', 'control-b')).kind).toBe('conflict')
@@ -64,6 +66,30 @@ describe('RequestStore', () => {
     await store.reserve('new', 'b')
     expect(await store.get('active')).toBeUndefined()
     expect(await store.activeCount()).toBe(1)
+    expect(await store.hasSession('session-active')).toBe(true)
+  })
+
+  it('persists session ownership after request records expire', async () => {
+    let clock = 1_000
+    const { store, file } = await fixture(() => clock, 100)
+    await store.reserve('original', 'fingerprint')
+    await store.activate('original', 'owned-session')
+    await store.finish('original', protocolResult('original', 'completed', { sessionId: 'owned-session' }))
+    clock += 101
+    await store.reserve('cleanup-trigger', 'fingerprint')
+    expect(await store.get('original')).toBeUndefined()
+    await store.close()
+
+    const reopened = new RequestStore(file, 100, () => clock)
+    await reopened.open()
+    expect(await reopened.hasSession('owned-session')).toBe(true)
+  })
+
+  it('handles topic-safe prototype property names without corrupting dictionaries', async () => {
+    const { store } = await fixture()
+    expect((await store.reserve('constructor', 'request-fingerprint')).kind).toBe('reserved')
+    expect((await store.claimControl('constructor', 'toString', 'control-fingerprint')).kind).toBe('claimed')
+    expect((await store.claimControl('constructor', 'toString', 'control-fingerprint')).kind).toBe('duplicate')
   })
 
   it('fails loudly on a corrupt state file', async () => {
@@ -75,6 +101,18 @@ describe('RequestStore', () => {
       mkdir(directory, { recursive: true }),
       writeFile(file, '{"version":99}'),
     ]))
+    await expect(corrupt.open()).rejects.toThrow(/failed to load state file/)
+  })
+
+  it.each([
+    '{"version":1,"requests":{"bad/#":{}},"sessions":[]}',
+    '{"version":1,"requests":{"req":{"id":"req","fingerprint":"x","status":"unknown","createdAt":1,"updatedAt":1,"expiresAt":2,"controls":{}}},"sessions":[]}',
+    '{"version":1,"requests":{"req":{"id":"req","fingerprint":"x","status":"completed","createdAt":1,"updatedAt":1,"expiresAt":2,"controls":{}}},"sessions":[]}',
+    '{"version":1,"requests":{},"sessions":["bad/#"]}',
+  ])('rejects structurally invalid persisted state: %s', async raw => {
+    const { file } = await fixture()
+    await import('node:fs/promises').then(({ writeFile }) => writeFile(file, raw))
+    const corrupt = new RequestStore(file, 1_000)
     await expect(corrupt.open()).rejects.toThrow(/failed to load state file/)
   })
 })

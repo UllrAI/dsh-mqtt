@@ -24,6 +24,7 @@ export class MqttTransport implements GatewayTransport {
 
   async start(handlers: TransportHandlers): Promise<void> {
     if (this.client !== undefined) throw new Error('dsh-mqtt transport is already started')
+    this.stopping = false
     const { config, topics, offlineStatus, logger } = this.options
     const [ca, cert, key] = await Promise.all([
       optionalFile(config.caFile),
@@ -88,6 +89,7 @@ export class MqttTransport implements GatewayTransport {
 
     await new Promise<void>((resolve, reject) => {
       let settled = false
+      let initializationQueue = Promise.resolve()
       const fail = (error: Error): void => {
         if (settled) return
         settled = true
@@ -95,7 +97,8 @@ export class MqttTransport implements GatewayTransport {
       }
       const connected = (): void => {
         const generation = ++this.connectGeneration
-        void (async () => {
+        initializationQueue = initializationQueue.then(async () => {
+          if (this.stopping || generation !== this.connectGeneration) return
           try {
             await client.subscribeAsync({
               [topics.requests]: { qos: 1 },
@@ -108,11 +111,12 @@ export class MqttTransport implements GatewayTransport {
               resolve()
             }
           } catch (error) {
+            if (this.stopping || generation !== this.connectGeneration) return
             const reason = error instanceof Error ? error : new Error(String(error))
             logger.error('dsh-mqtt: failed to initialize broker subscription', reason)
             fail(reason)
           }
-        })()
+        })
       }
       client.on('connect', connected)
       client.once('error', fail)
@@ -126,9 +130,30 @@ export class MqttTransport implements GatewayTransport {
   async publish(topic: string, payload: string, options: PublishOptions): Promise<void> {
     const client = this.client
     if (client === undefined || this.stopping) throw new Error('dsh-mqtt transport is not available')
-    await client.publishAsync(topic, payload, {
-      qos: options.qos,
-      retain: options.retain ?? false,
+    await new Promise<void>((resolve, reject) => {
+      let settled = false
+      const succeed = (): void => {
+        if (settled) return
+        settled = true
+        resolve()
+      }
+      const fail = (error?: Error): void => {
+        if (settled) return
+        if (error === undefined) succeed()
+        else {
+          settled = true
+          reject(error)
+        }
+      }
+      if (options.qos === 0) {
+        client.publish(topic, payload, { qos: 0, retain: options.retain ?? false }, fail)
+      } else {
+        client.publish(topic, payload, {
+          qos: 1,
+          retain: options.retain ?? false,
+          cbStorePut: succeed,
+        }, fail)
+      }
     })
   }
 
@@ -136,6 +161,7 @@ export class MqttTransport implements GatewayTransport {
     const client = this.client
     if (client === undefined) return
     this.stopping = true
+    this.connectGeneration += 1
     this.client = undefined
     await client.endAsync(false)
   }

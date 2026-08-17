@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { isRequestId } from './topics.ts'
 
 export const PROTOCOL_VERSION = 1 as const
+const RFC3339_DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|([+-])(\d{2}):(\d{2}))$/
 
 export type RequestStatus = 'completed' | 'failed' | 'cancelled'
 export type ControlType = 'request.steer' | 'request.inject' | 'request.cancel'
@@ -77,6 +78,25 @@ function plainObject(value: unknown): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null
 }
 
+export function isRfc3339DateTime(value: string): boolean {
+  const match = RFC3339_DATE_TIME.exec(value)
+  if (match === null) return false
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, , offsetHourText, offsetMinuteText] = match
+  const year = Number(yearText)
+  const month = Number(monthText)
+  const day = Number(dayText)
+  const hour = Number(hourText)
+  const minute = Number(minuteText)
+  const second = Number(secondText)
+  const offsetHour = offsetHourText === undefined ? 0 : Number(offsetHourText)
+  const offsetMinute = offsetMinuteText === undefined ? 0 : Number(offsetMinuteText)
+  if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59
+    || offsetHour > 23 || offsetMinute > 59) return false
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1] as number
+  return day >= 1 && day <= daysInMonth
+}
+
 function stringField(
   value: Record<string, unknown>,
   key: string,
@@ -114,7 +134,7 @@ function parseEnvelope(payload: Uint8Array, limits: ProtocolLimits): Record<stri
     throw new ProtocolError('INVALID_REQUEST_ID', 'id must be 1 to 128 topic-safe characters', candidateId)
   }
   const timestamp = stringField(value, 'timestamp', { requestId: id })
-  if (timestamp === undefined || !Number.isFinite(Date.parse(timestamp))) {
+  if (timestamp === undefined || !isRfc3339DateTime(timestamp)) {
     throw new ProtocolError('INVALID_TIMESTAMP', 'timestamp must be an RFC 3339 date-time', id)
   }
   return value

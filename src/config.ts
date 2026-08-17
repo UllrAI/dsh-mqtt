@@ -25,6 +25,7 @@ export interface Config {
   stateFile?: string
   workspaces?: Record<string, string>
   defaultWorkspace?: string
+  allowExternalSessions?: boolean
   provider?: string
   model?: string
   maxTokens?: number
@@ -57,6 +58,7 @@ export interface ResolvedConfig {
   stateFile: string
   workspaces: Readonly<Record<string, string>>
   defaultWorkspace?: string
+  allowExternalSessions: boolean
   agentOptions: {
     provider?: string
     model?: string
@@ -95,6 +97,7 @@ export const Config: Schema<Config> = Schema.object({
   stateFile: Schema.string().default('.dsh-mqtt/state.json'),
   workspaces: Schema.dict(Schema.string()).default({}),
   defaultWorkspace: Schema.string(),
+  allowExternalSessions: Schema.boolean().default(false),
   provider: Schema.string(),
   model: Schema.string(),
   maxTokens: Schema.number(),
@@ -151,7 +154,7 @@ function optionalSecret(
 }
 
 function resolveWorkspaces(input: Record<string, string>): Readonly<Record<string, string>> {
-  const output: Record<string, string> = {}
+  const output = Object.create(null) as Record<string, string>
   for (const [alias, path] of Object.entries(input)) {
     if (!WORKSPACE_ALIAS.test(alias)) {
       throw new Error(`dsh-mqtt: workspace alias ${JSON.stringify(alias)} is invalid`)
@@ -229,6 +232,7 @@ export function resolveConfig(config: Config, env: NodeJS.ProcessEnv = process.e
     stateFile: resolve(config.stateFile ?? '.dsh-mqtt/state.json'),
     workspaces,
     ...config.defaultWorkspace === undefined ? {} : { defaultWorkspace: config.defaultWorkspace },
+    allowExternalSessions: config.allowExternalSessions ?? false,
     agentOptions: {
       ...config.provider === undefined ? {} : { provider: config.provider },
       ...config.model === undefined ? {} : { model: config.model },

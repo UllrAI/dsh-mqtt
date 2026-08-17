@@ -14,7 +14,7 @@ import {
   type GatewayResult,
   type SubmitRequest,
 } from './protocol.ts'
-import { RequestStore, type StoredRequest } from './state-store.ts'
+import { RequestStore } from './state-store.ts'
 import { TopicLayout } from './topics.ts'
 import type { GatewayTransport, IncomingMessage, Logger } from './transport.ts'
 
@@ -180,6 +180,16 @@ export class MqttAgentGateway {
       await this.failReserved(request.id, 'CAPACITY_EXCEEDED', 'gateway has reached its active request limit', true)
       return
     }
+    if (request.session_id !== undefined
+      && !this.config.allowExternalSessions
+      && !(await this.store.hasSession(request.session_id))) {
+      await this.failReserved(
+        request.id,
+        'SESSION_NOT_OWNED',
+        'session was not created by this gateway; set allowExternalSessions to opt in',
+      )
+      return
+    }
     if (request.session_id !== undefined && this.requestBySession.has(request.session_id)) {
       await this.failReserved(request.id, 'SESSION_BUSY', 'the requested session already has an active MQTT request', true)
       return
@@ -221,7 +231,10 @@ export class MqttAgentGateway {
     try {
       control = parseControl(message.payload, requestId, this.config.limits)
     } catch (error) {
-      await this.handleProtocolError(error, requestId)
+      if (!(error instanceof ProtocolError)) throw error
+      await this.publishEvent(requestId, 'request.control.rejected', {
+        error: gatewayError(error.code, error.message, error.retryable),
+      })
       return
     }
     if (message.retain) {
@@ -366,9 +379,9 @@ export class MqttAgentGateway {
     await this.publishResult(result)
   }
 
-  private async handleProtocolError(error: unknown, fallbackId?: string): Promise<void> {
+  private async handleProtocolError(error: unknown): Promise<void> {
     if (!(error instanceof ProtocolError)) throw error
-    const id = fallbackId ?? error.requestId
+    const id = error.requestId
     if (id === undefined) {
       this.logger.warn(`dsh-mqtt: rejected uncorrelated message: ${error.code}: ${error.message}`)
       return
@@ -416,12 +429,5 @@ export function offlineStatus(config: ResolvedConfig): string {
     node_id: config.nodeId,
     online: false,
     gateway_version: GATEWAY_VERSION,
-  })
-}
-
-export function interruptedResult(record: StoredRequest): GatewayResult {
-  return protocolResult(record.id, 'failed', {
-    ...record.sessionId === undefined ? {} : { sessionId: record.sessionId },
-    error: gatewayError('GATEWAY_RESTARTED', 'the gateway restarted before this request completed', true),
   })
 }

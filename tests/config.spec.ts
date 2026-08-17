@@ -22,6 +22,7 @@ describe('resolveConfig', () => {
     expect(config.clientId).toBe('dsh-mqtt-team-a-mac-mini')
     expect(config.protocolVersion).toBe(5)
     expect(config.clean).toBe(false)
+    expect(config.allowExternalSessions).toBe(false)
     expect(config.username).toBe('alice')
     expect(config.password).toBe('secret')
     expect(config.workspaces.app).toBe(resolve('fixtures/app'))
@@ -83,6 +84,7 @@ describe('resolveConfig', () => {
       username: 'direct-user',
       password: 'direct-password',
       reconnectPeriodMs: 0,
+      allowExternalSessions: true,
     }, {})
     expect(config).toMatchObject({
       protocolVersion: 4,
@@ -90,6 +92,18 @@ describe('resolveConfig', () => {
       username: 'direct-user',
       password: 'direct-password',
       reconnectPeriodMs: 0,
+      allowExternalSessions: true,
     })
+  })
+
+  it('handles prototype property names as ordinary workspace aliases', () => {
+    const config = resolveConfig({
+      url: 'mqtt://localhost',
+      namespace: 'safe',
+      nodeId: 'node',
+      workspaces: { constructor: '/tmp/prototype-workspace' },
+      defaultWorkspace: 'constructor',
+    }, {})
+    expect(config.workspaces.constructor).toBe('/tmp/prototype-workspace')
   })
 })
