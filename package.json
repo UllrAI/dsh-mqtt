@@ -22,6 +22,7 @@
     "cordis.patch.yml",
     "README.md",
     "README.zh.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {
@@ -59,6 +60,9 @@
   },
   "homepage": "https://github.com/UllrAI/dsh-mqtt#readme",
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.1",
     "mqtt": "^5.15.2"
