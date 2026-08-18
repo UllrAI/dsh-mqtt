@@ -129,6 +129,12 @@ Git 依赖会通过包内的 `prepare` 脚本完成构建。pnpm 10 及以上版
     url: mqtt://127.0.0.1:1883
     namespace: ullrai
     nodeId: mac-mini
+    displayName: Mac mini · 开发机
+
+    # Worker 管理界面默认只监听本机 127.0.0.1:3210。
+    managementHost: 127.0.0.1
+    managementPort: 3210
+    requireControllerAuth: true
 
     workspaces:
       repo-foo: /absolute/path/to/repo-foo
@@ -154,6 +160,27 @@ npx @deepseek-ai/dsh --profile web --dump-config
 export DEEPSEEK_API_KEY='...'
 npx @deepseek-ai/dsh --profile web
 ```
+
+### 打开 Worker 管理界面
+
+插件启动后，在 Worker 所在机器打开：
+
+```text
+http://127.0.0.1:3210/
+```
+
+这里显示的 Broker、Agent、模型、工作区和任务容量均来自 Gateway 实时检查，不使用演示数据。页面可以生成控制端邀请、确认授权、查看最近使用时间并撤销控制端。设置 `managementPort: 0` 可以关闭管理界面。
+
+管理服务默认只绑定 loopback。若把 `managementHost` 设置为 `0.0.0.0` 或其他非本机地址，必须同时设置 `managementToken` 或 `managementTokenEnv`；浏览器和 API 调用需要发送 `Authorization: Bearer <token>`。不要把未认证的管理端口暴露到局域网或互联网。
+
+### 添加控制端
+
+1. 在 Worker 管理界面点击“添加控制端”，输入名称并生成十分钟有效的配置。
+2. 把配置复制到控制端；配置只包含 Broker 地址、namespace、节点 ID、控制端 ID 和一次性 token，不包含 Worker 的 Broker 密码或模型凭据。
+3. 控制端仍需配置独立的 Broker 凭据，并按下面的 ACL 仅访问目标节点。
+4. 回到 Worker 管理界面确认授权。启用 `requireControllerAuth: true` 后，未授权、已过期或已撤销的 token 无法提交或控制任务。
+
+程序化控制端可以直接使用包导出的 `MqttControllerClient`。它会自动在提交和控制消息中携带 `controller_id` 与 `token`，订阅节点状态、事件和结果，并提供 `waitForResult()`。
 
 以下命令应立即收到 retained 在线状态：
 
@@ -395,11 +422,28 @@ dsh/v1/{namespace}/nodes/{nodeId}/status
   "type": "node.status",
   "timestamp": "2026-08-17T12:00:00.000Z",
   "node_id": "mac-mini",
+  "display_name": "Mac mini · 开发机",
+  "state": "ready",
   "online": true,
+  "heartbeat_at": "2026-08-18T12:00:00.000Z",
+  "expires_at": "2026-08-18T12:00:30.000Z",
+  "active_requests": 0,
+  "request_capacity": 16,
+  "workspaces": [{ "alias": "repo-foo", "status": "ready" }],
+  "controller_auth_required": true,
   "gateway_version": "0.1.0",
-  "capabilities": ["coding"]
+  "protocol_version": 1,
+  "capabilities": ["coding"],
+  "health": [
+    { "name": "broker", "status": "ready" },
+    { "name": "agent", "status": "ready" },
+    { "name": "model", "status": "ready" },
+    { "name": "workspace:repo-foo", "status": "ready" }
+  ]
 }
 ```
+
+`state` 可能为 `starting`、`connecting`、`ready`、`busy`、`degraded`、`offline` 或 `stopped`。Controller 不应只看 retained `online: true`；当前时间超过 `expires_at` 时应将节点视为 stale，等待下一次心跳。状态只暴露工作区别名，不暴露真实路径。
 
 网关会在同一 Topic 配置 retained 离线 Last Will，并在正常关闭时主动发布离线状态。Last Will 的时间戳在建立连接配置时生成，不是 Broker 检测到断线的时刻；需要精确离线时间时，应使用 Broker 接收时间。
 

@@ -129,6 +129,12 @@ Edit `~/.dsh/profiles/web/cordis.patch.yml`, or the equivalent path below `$DSH_
     url: mqtt://127.0.0.1:1883
     namespace: ullrai
     nodeId: mac-mini
+    displayName: Mac mini · development
+
+    # The Worker management UI listens on loopback by default.
+    managementHost: 127.0.0.1
+    managementPort: 3210
+    requireControllerAuth: true
 
     workspaces:
       repo-foo: /absolute/path/to/repo-foo
@@ -154,6 +160,27 @@ Then start DSH from the desired workspace:
 export DEEPSEEK_API_KEY='...'
 npx @deepseek-ai/dsh --profile web
 ```
+
+### Open the Worker management UI
+
+After the plugin starts, open this URL on the Worker machine:
+
+```text
+http://127.0.0.1:3210/
+```
+
+Broker, Agent, model, workspace, and capacity data come from live Gateway checks. The UI creates controller invitations, approves access, reports last use, and revokes controllers. Set `managementPort: 0` to disable it.
+
+The management server binds to loopback by default. A non-loopback `managementHost` requires `managementToken` or `managementTokenEnv`; clients must send `Authorization: Bearer <token>`. Never expose an unauthenticated management endpoint to a network.
+
+### Add a controller
+
+1. Select **Add controller** in the Worker UI and generate a ten-minute invitation.
+2. Copy the invitation to the controller. It contains the Broker URL, namespace, node ID, controller ID, and application token, but no Worker Broker password or model credential.
+3. Configure separate Broker credentials on the controller with node-scoped ACLs.
+4. Approve the pending controller in the Worker UI. With `requireControllerAuth: true`, pending, expired, or revoked tokens cannot submit or control work.
+
+Programmatic controllers can use the exported `MqttControllerClient`. It adds `controller_id` and `token` to commands, subscribes to status/events/results, and provides `waitForResult()`.
 
 The retained status message should appear at:
 
@@ -395,11 +422,28 @@ The gateway publishes retained online status after each successful connection:
   "type": "node.status",
   "timestamp": "2026-08-17T12:00:00.000Z",
   "node_id": "mac-mini",
+  "display_name": "Mac mini · development",
+  "state": "ready",
   "online": true,
+  "heartbeat_at": "2026-08-17T12:00:00.000Z",
+  "expires_at": "2026-08-17T12:00:30.000Z",
+  "active_requests": 0,
+  "request_capacity": 16,
+  "workspaces": [{ "alias": "repo-foo", "status": "ready" }],
+  "controller_auth_required": true,
   "gateway_version": "0.1.0",
-  "capabilities": ["coding"]
+  "protocol_version": 1,
+  "capabilities": ["coding"],
+  "health": [
+    { "name": "broker", "status": "ready" },
+    { "name": "agent", "status": "ready" },
+    { "name": "model", "status": "ready" },
+    { "name": "workspace:repo-foo", "status": "ready" }
+  ]
 }
 ```
+
+`state` is one of `starting`, `connecting`, `ready`, `busy`, `degraded`, `offline`, or `stopped`. Controllers must not trust a retained `online: true` forever: when the current time passes `expires_at`, treat the node as stale until a new heartbeat arrives. Presence exposes workspace aliases, never filesystem paths.
 
 It configures a retained offline Last Will on the same topic and explicitly publishes offline status during graceful shutdown. A Last Will timestamp is created when the connection is configured, not when the broker detects the disconnect; use broker receipt time when exact offline timing matters.
 
