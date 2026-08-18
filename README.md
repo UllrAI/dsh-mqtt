@@ -572,6 +572,17 @@ To inspect the publishable package:
 pnpm pack
 ```
 
+### Release automation
+
+Releases are tag-driven. Update `package.json` and `CHANGELOG.md`, commit the changes, and push a matching non-prerelease tag:
+
+```sh
+git tag v0.1.1
+git push origin v0.1.1
+```
+
+The `Release` workflow verifies that the tag matches `package.json`, installs from the frozen lockfile, runs `pnpm check`, publishes the package to npm, and creates a GitHub Release with generated notes. Configure an npm granular automation token as the repository secret `NPM_TOKEN`; it must be allowed to publish `dsh-mqtt`. The workflow intentionally rejects prerelease tags until a separate prerelease policy is defined. Do not create a tag until the version, changelog, and release contents are ready.
+
 The public module exports the Cordis plugin plus `MqttAgentGateway`, `RequestStore`, and `TopicLayout`. `dsh-mqtt/protocol` exports protocol types, parsers, fingerprints, and envelope builders.
 
 ## Current limitations
