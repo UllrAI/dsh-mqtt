@@ -82,11 +82,27 @@ describe('ManagementServer', () => {
     expect(gateway.revokeController).toHaveBeenCalledWith(invite.id)
     expect((await fetch(`${base}/missing`)).status).toBe(404)
     expect((await fetch(`${base}/status`, { method: 'OPTIONS' })).status).toBe(204)
+    expect((await fetch(`${base}/status`)).headers.get('access-control-allow-origin')).toBeNull()
     expect((await fetch(`${base}/controllers/invites`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: '[]',
-    })).status).toBe(500)
+    })).status).toBe(400)
+    expect((await fetch(`${base}/controllers/invites`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{',
+    })).status).toBe(400)
+    expect((await fetch(`${base}/controllers/invites`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: '   ' }),
+    })).status).toBe(400)
+    expect((await fetch(`${base}/controllers/invites`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'MacBook', scopes: 'submit' }),
+    })).status).toBe(400)
   })
 
   it('requires a bearer token when management authentication is configured', async () => {
@@ -97,13 +113,17 @@ describe('ManagementServer', () => {
       nodeId: 'worker',
       managementPort: port,
       managementToken: 'management-secret',
+      managementCorsOrigin: 'https://control.example.com',
     })
     const gateway = { getStatus: vi.fn() } as unknown as MqttAgentGateway
     const server = new ManagementServer({ gateway, config, logger: logger() })
     servers.push(server)
     await server.start()
     const url = `http://127.0.0.1:${port}/api/status`
+    expect(await fetch(`http://127.0.0.1:${port}/`).then(response => response.text())).toContain('<div id="root"></div>')
     expect((await fetch(url)).status).toBe(401)
-    expect((await fetch(url, { headers: { authorization: 'Bearer management-secret' } })).status).toBe(200)
+    const response = await fetch(url, { headers: { authorization: 'Bearer management-secret' } })
+    expect(response.status).toBe(200)
+    expect(response.headers.get('access-control-allow-origin')).toBe('https://control.example.com')
   })
 })
