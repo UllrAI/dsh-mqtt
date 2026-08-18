@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## 0.1.2 - 2026-08-18
+
+### Fixed
+
+- Rebuild the packaged management UI from the pinned, release-age-verified icon dependency so local and clean-environment bundles are reproducible.
+- Allow the tag release workflow to resume safely when the matching npm version was already published before a retry.
+
 ## 0.1.1 - 2026-08-18
 
 ### Added
