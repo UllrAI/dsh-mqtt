@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- Keep DSH Host startup independent from the broker's initial CONNACK; unavailable brokers now reconnect in the background instead of preventing the plugin tree from loading.
+
 ## 0.1.0 - 2026-08-18
 
 First public release of `dsh-mqtt`, an MQTT protocol driver and agent worker gateway for DeepSeek Harness.

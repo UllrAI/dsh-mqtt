@@ -87,44 +87,30 @@ export class MqttTransport implements GatewayTransport {
     client.on('offline', () => logger.warn('dsh-mqtt: broker connection is offline'))
     client.on('error', error => logger.error('dsh-mqtt: broker error', error))
 
-    await new Promise<void>((resolve, reject) => {
-      let settled = false
-      let initializationQueue = Promise.resolve()
-      const fail = (error: Error): void => {
-        if (settled) return
-        settled = true
-        reject(error)
-      }
-      const connected = (): void => {
-        const generation = ++this.connectGeneration
-        initializationQueue = initializationQueue.then(async () => {
+    let initializationQueue = Promise.resolve()
+    const connected = (): void => {
+      const generation = ++this.connectGeneration
+      initializationQueue = initializationQueue.then(async () => {
+        if (this.stopping || generation !== this.connectGeneration) return
+        try {
+          await client.subscribeAsync({
+            [topics.requests]: { qos: 1 },
+            [topics.controlFilter]: { qos: 1 },
+          })
           if (this.stopping || generation !== this.connectGeneration) return
-          try {
-            await client.subscribeAsync({
-              [topics.requests]: { qos: 1 },
-              [topics.controlFilter]: { qos: 1 },
-            })
-            if (this.stopping || generation !== this.connectGeneration) return
-            await handlers.onConnect()
-            if (!settled) {
-              settled = true
-              resolve()
-            }
-          } catch (error) {
-            if (this.stopping || generation !== this.connectGeneration) return
-            const reason = error instanceof Error ? error : new Error(String(error))
-            logger.error('dsh-mqtt: failed to initialize broker subscription', reason)
-            fail(reason)
-          }
-        })
-      }
-      client.on('connect', connected)
-      client.once('error', fail)
-    }).catch(async error => {
-      await client.endAsync(true).catch(() => undefined)
-      this.client = undefined
-      throw error
-    })
+          await handlers.onConnect()
+        } catch (error) {
+          if (this.stopping || generation !== this.connectGeneration) return
+          const reason = error instanceof Error ? error : new Error(String(error))
+          logger.error('dsh-mqtt: failed to initialize broker subscription', reason)
+        }
+      }).catch(error => {
+        if (!this.stopping && generation === this.connectGeneration) {
+          logger.error('dsh-mqtt: broker initialization task failed', error)
+        }
+      })
+    }
+    client.on('connect', connected)
   }
 
   async publish(topic: string, payload: string, options: PublishOptions): Promise<void> {

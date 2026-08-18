@@ -82,6 +82,30 @@ afterEach(async () => {
 })
 
 describe('MqttTransport integration', () => {
+  it('does not block transport startup while the broker is unreachable', async () => {
+    const config = resolveConfig({
+      url: 'mqtt://127.0.0.1:1',
+      namespace: 'integration',
+      nodeId: 'unreachable-worker',
+      clientId: 'dsh-mqtt-unreachable-worker',
+      protocolVersion: 4,
+      clean: true,
+      connectTimeoutMs: 50,
+      reconnectPeriodMs: 0,
+    })
+    const topics = new TopicLayout(config.namespace, config.nodeId)
+    const transport = new MqttTransport({
+      config,
+      topics,
+      offlineStatus: JSON.stringify({ type: 'node.status', online: false }),
+      logger: logger(),
+    })
+    transports.push(transport)
+
+    await expect(transport.start({ onMessage: () => undefined, onConnect: () => undefined })).resolves.toBeUndefined()
+    await expect(transport.stop()).resolves.toBeUndefined()
+  })
+
   it('authenticates to a broker with MQTT username and password', async () => {
     let authenticatedClient: string | undefined
     const fixture = await brokerFixture({
@@ -113,7 +137,7 @@ describe('MqttTransport integration', () => {
 
     await transport.start({ onMessage: () => undefined, onConnect: () => undefined })
 
-    expect(authenticatedClient).toBe('dsh-mqtt-authenticated-worker')
+    await expect.poll(() => authenticatedClient).toBe('dsh-mqtt-authenticated-worker')
   })
 
   it('subscribes to commands and publishes correlated output through a real broker', async () => {
@@ -152,7 +176,7 @@ describe('MqttTransport integration', () => {
         })
       },
     })
-    expect(connections).toBe(1)
+    await expect.poll(() => connections).toBe(1)
 
     const client = await observer(fixture.url)
     const publish = client.publishAsync(topics.requests, JSON.stringify({ id: 'req-1' }), { qos: 1 })
