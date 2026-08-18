@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { connect, type IClientOptions, type MqttClient } from 'mqtt'
 import type { ResolvedConfig } from './config.ts'
-import type { GatewayTransport, Logger, PublishOptions, TransportHandlers } from './transport.ts'
+import type { GatewayTransport, Logger, PublishOptions, TransportHandlers, TransportState } from './transport.ts'
 import type { TopicLayout } from './topics.ts'
 
 export interface MqttTransportOptions {
@@ -19,6 +19,10 @@ export class MqttTransport implements GatewayTransport {
   private client: MqttClient | undefined
   private stopping = false
   private connectGeneration = 0
+
+  private async notifyState(handlers: TransportHandlers, state: TransportState): Promise<void> {
+    await handlers.onState?.(state)
+  }
 
   constructor(private readonly options: MqttTransportOptions) {}
 
@@ -59,6 +63,7 @@ export class MqttTransport implements GatewayTransport {
 
     const client = connect(config.url, clientOptions)
     this.client = client
+    await this.notifyState(handlers, 'connecting')
     const messageTasks = new WeakMap<object, Promise<void>>()
     client.on('message', (topic, payload, packet) => {
       const message = {
@@ -83,8 +88,14 @@ export class MqttTransport implements GatewayTransport {
         },
       )
     }
-    client.on('reconnect', () => logger.info('dsh-mqtt: reconnecting to broker'))
-    client.on('offline', () => logger.warn('dsh-mqtt: broker connection is offline'))
+    client.on('reconnect', () => {
+      logger.info('dsh-mqtt: reconnecting to broker')
+      void this.notifyState(handlers, 'connecting').catch(error => logger.warn('dsh-mqtt: failed to publish transport state', error))
+    })
+    client.on('offline', () => {
+      logger.warn('dsh-mqtt: broker connection is offline')
+      void this.notifyState(handlers, 'offline').catch(error => logger.warn('dsh-mqtt: failed to publish transport state', error))
+    })
     client.on('error', error => logger.error('dsh-mqtt: broker error', error))
 
     let initializationQueue = Promise.resolve()
@@ -99,10 +110,12 @@ export class MqttTransport implements GatewayTransport {
           })
           if (this.stopping || generation !== this.connectGeneration) return
           await handlers.onConnect()
+          await this.notifyState(handlers, 'connected')
         } catch (error) {
           if (this.stopping || generation !== this.connectGeneration) return
           const reason = error instanceof Error ? error : new Error(String(error))
           logger.error('dsh-mqtt: failed to initialize broker subscription', reason)
+          await this.notifyState(handlers, 'degraded')
         }
       }).catch(error => {
         if (!this.stopping && generation === this.connectGeneration) {
@@ -149,6 +162,7 @@ export class MqttTransport implements GatewayTransport {
     this.stopping = true
     this.connectGeneration += 1
     this.client = undefined
+    // No handler is retained after stop; the gateway publishes its final state.
     await client.endAsync(!client.connected)
   }
 }

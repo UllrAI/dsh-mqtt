@@ -13,7 +13,10 @@ export interface PublishOptions {
 export interface TransportHandlers {
   onMessage(message: IncomingMessage): void | Promise<void>
   onConnect(): void | Promise<void>
+  onState?(state: TransportState): void | Promise<void>
 }
+
+export type TransportState = 'connecting' | 'connected' | 'degraded' | 'offline' | 'stopped'
 
 export interface GatewayTransport {
   start(handlers: TransportHandlers): Promise<void>

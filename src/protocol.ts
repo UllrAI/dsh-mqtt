@@ -16,6 +16,8 @@ export interface SubmitRequest {
   workspace?: string
   session_id?: string
   metadata?: Record<string, unknown>
+  controller_id?: string
+  token?: string
 }
 
 export interface ControlRequest {
@@ -26,6 +28,8 @@ export interface ControlRequest {
   timestamp: string
   input?: string
   reason?: string
+  controller_id?: string
+  token?: string
 }
 
 export interface GatewayEvent {
@@ -152,6 +156,8 @@ export function parseSubmit(payload: Uint8Array, limits: ProtocolLimits): Submit
   if (sessionId !== undefined && !isRequestId(sessionId)) {
     throw new ProtocolError('INVALID_SESSION_ID', 'session_id must be topic-safe and no longer than 128 characters', id)
   }
+  const controllerId = stringField(value, 'controller_id', { optional: true, max: 128, requestId: id })
+  const token = stringField(value, 'token', { optional: true, max: 256, requestId: id })
 
   let metadata: Record<string, unknown> | undefined
   if (value.metadata !== undefined) {
@@ -173,6 +179,8 @@ export function parseSubmit(payload: Uint8Array, limits: ProtocolLimits): Submit
     ...workspace === undefined ? {} : { workspace },
     ...sessionId === undefined ? {} : { session_id: sessionId },
     ...metadata === undefined ? {} : { metadata },
+    ...controllerId === undefined ? {} : { controller_id: controllerId },
+    ...token === undefined ? {} : { token },
   }
 }
 
@@ -200,6 +208,8 @@ export function parseControl(
     requestId: id,
   })
   const reason = stringField(value, 'reason', { optional: true, max: 512, requestId: id })
+  const controllerId = stringField(value, 'controller_id', { optional: true, max: 128, requestId: id })
+  const token = stringField(value, 'token', { optional: true, max: 256, requestId: id })
 
   return {
     version: PROTOCOL_VERSION,
@@ -209,6 +219,8 @@ export function parseControl(
     timestamp: value.timestamp as string,
     ...input === undefined ? {} : { input },
     ...reason === undefined ? {} : { reason },
+    ...controllerId === undefined ? {} : { controller_id: controllerId },
+    ...token === undefined ? {} : { token },
   }
 }
 

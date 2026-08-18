@@ -7,6 +7,7 @@ export interface Config {
   url: string
   namespace: string
   nodeId: string
+  displayName?: string
   clientId?: string
   protocolVersion?: 4 | 5
   clean?: boolean
@@ -36,12 +37,20 @@ export interface Config {
   maxInputChars?: number
   maxActiveRequests?: number
   dedupTtlSeconds?: number
+  heartbeatSeconds?: number
+  managementPort?: number
+  managementHost?: string
+  managementCorsOrigin?: string
+  managementToken?: string
+  managementTokenEnv?: string
+  requireControllerAuth?: boolean
 }
 
 export interface ResolvedConfig {
   url: string
   namespace: string
   nodeId: string
+  displayName: string
   clientId: string
   protocolVersion: 4 | 5
   clean: boolean
@@ -73,12 +82,19 @@ export interface ResolvedConfig {
     maxActiveRequests: number
     dedupTtlMs: number
   }
+  heartbeatSeconds: number
+  managementPort: number
+  managementHost: string
+  managementCorsOrigin?: string
+  managementToken?: string
+  requireControllerAuth: boolean
 }
 
 export const Config: Schema<Config> = Schema.object({
   url: Schema.string().default('mqtt://127.0.0.1:1883'),
   namespace: Schema.string().default('local'),
   nodeId: Schema.string().default('dsh-node'),
+  displayName: Schema.string(),
   clientId: Schema.string(),
   protocolVersion: Schema.union([Schema.const(4), Schema.const(5)]).default(5),
   clean: Schema.boolean().default(false),
@@ -108,6 +124,13 @@ export const Config: Schema<Config> = Schema.object({
   maxInputChars: Schema.number().default(32_768),
   maxActiveRequests: Schema.number().default(16),
   dedupTtlSeconds: Schema.number().default(604_800),
+  heartbeatSeconds: Schema.number().default(15),
+  managementPort: Schema.number().default(3210),
+  managementHost: Schema.string().default('127.0.0.1'),
+  managementCorsOrigin: Schema.string(),
+  managementToken: Schema.string().role('secret'),
+  managementTokenEnv: Schema.string(),
+  requireControllerAuth: Schema.boolean().default(false),
 })
 
 const TOPIC_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
@@ -187,6 +210,10 @@ export function resolveConfig(config: Config, env: NodeJS.ProcessEnv = process.e
 
   const namespace = topicSegment(config.namespace, 'namespace')
   const nodeId = topicSegment(config.nodeId, 'nodeId')
+  const displayName = config.displayName ?? nodeId
+  if (displayName.length === 0 || displayName.length > 128) {
+    throw new Error('dsh-mqtt: displayName must contain 1 to 128 characters')
+  }
   const clientId = config.clientId ?? `dsh-mqtt-${namespace}-${nodeId}`
   if (clientId.length === 0 || clientId.length > 128 || clientId.includes(String.fromCharCode(0))) {
     throw new Error('dsh-mqtt: clientId must contain 1 to 128 non-NUL characters')
@@ -223,11 +250,26 @@ export function resolveConfig(config: Config, env: NodeJS.ProcessEnv = process.e
     throw new Error('dsh-mqtt: maxMetadataBytes must not exceed maxMessageBytes')
   }
   const dedupTtlSeconds = positiveInteger(config.dedupTtlSeconds ?? 604_800, 'dedupTtlSeconds', Math.floor(MAX_TIMER_MILLIS / 1_000))
+  const heartbeatSeconds = positiveInteger(config.heartbeatSeconds ?? 15, 'heartbeatSeconds', Math.floor(MAX_TIMER_MILLIS / 1_000))
+  const managementPort = nonNegativeInteger(config.managementPort ?? 3210, 'managementPort', 65_535)
+  const managementHost = config.managementHost ?? '127.0.0.1'
+  if (managementHost.length === 0 || managementHost.length > 253) {
+    throw new Error('dsh-mqtt: managementHost must contain 1 to 253 characters')
+  }
+  const managementCorsOrigin = config.managementCorsOrigin
+  if (managementCorsOrigin !== undefined && managementCorsOrigin.length === 0) {
+    throw new Error('dsh-mqtt: managementCorsOrigin must not be empty')
+  }
+  const managementToken = optionalSecret(config.managementToken, config.managementTokenEnv, 'managementToken', env)
+  if (managementPort > 0 && !['127.0.0.1', 'localhost', '::1'].includes(managementHost) && managementToken === undefined) {
+    throw new Error('dsh-mqtt: managementToken is required when managementHost is not loopback')
+  }
 
   return {
     url: parsedUrl.toString(),
     namespace,
     nodeId,
+    displayName,
     clientId,
     protocolVersion,
     clean,
@@ -259,5 +301,11 @@ export function resolveConfig(config: Config, env: NodeJS.ProcessEnv = process.e
       maxActiveRequests: positiveInteger(config.maxActiveRequests ?? 16, 'maxActiveRequests'),
       dedupTtlMs: dedupTtlSeconds * 1_000,
     },
+    heartbeatSeconds,
+    managementPort,
+    managementHost,
+    ...managementCorsOrigin === undefined ? {} : { managementCorsOrigin },
+    ...managementToken === undefined ? {} : { managementToken },
+    requireControllerAuth: config.requireControllerAuth ?? false,
   }
 }

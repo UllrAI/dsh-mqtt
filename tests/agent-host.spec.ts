@@ -122,6 +122,11 @@ afterEach(async () => {
 describe('DshAgentHost', () => {
   it('creates an agent in an allowlisted workspace and delivers all input modes', async () => {
     const fixture = await setup()
+    await expect(fixture.host.health()).resolves.toEqual({
+      agent: 'ready',
+      model: 'ready',
+      workspaces: [{ alias: 'app', status: 'ready' }],
+    })
     const lease = await fixture.host.acquire({ requestId: 'req-1', workspace: 'app' })
     expect(lease).toEqual({ sessionId: expect.stringMatching(/^mqtt-[0-9a-f-]{36}$/), owned: true })
     expect(fixture.fake.create).toHaveBeenCalledWith({

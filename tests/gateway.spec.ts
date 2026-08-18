@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type {
   AgentAction,
   AgentHostHandlers,
+  AgentHostHealth,
   AgentLease,
   AcquireAgentOptions,
   GatewayAgentHost,
@@ -70,6 +71,14 @@ class FakeAgentHost implements GatewayAgentHost {
     return {
       sessionId: options.sessionId ?? `session-${options.requestId}`,
       owned: options.sessionId === undefined,
+    }
+  }
+
+  async health(): Promise<AgentHostHealth> {
+    return {
+      agent: 'ready',
+      model: 'ready',
+      workspaces: [{ alias: 'app', status: 'ready' }],
     }
   }
 
@@ -192,6 +201,52 @@ afterEach(async () => {
 })
 
 describe('MqttAgentGateway', () => {
+  it('publishes health-backed ready status with heartbeat expiry and capacity', async () => {
+    const fixture = await setup()
+    expect(fixture.transport.publications.at(-1)).toMatchObject({
+      topic: fixture.gateway.topics.status,
+      value: {
+        state: 'ready',
+        online: true,
+        active_requests: 0,
+        request_capacity: 16,
+        workspaces: [{ alias: 'app', status: 'ready' }],
+        health: expect.arrayContaining([
+          expect.objectContaining({ name: 'broker', status: 'ready' }),
+          expect.objectContaining({ name: 'agent', status: 'ready' }),
+        ]),
+      },
+    })
+    const status = await fixture.gateway.getStatus()
+    expect(new Date(status.expires_at).getTime()).toBeGreaterThan(new Date(status.heartbeat_at).getTime())
+  })
+
+  it('requires an authorized controller token when controller authentication is enabled', async () => {
+    const fixture = await setup({ requireControllerAuth: true })
+    await inbound(fixture, fixture.gateway.topics.requests, submit('unauthorized'))
+    expect(lastResult(fixture, 'unauthorized')).toMatchObject({ error: { code: 'AUTH_REQUIRED' } })
+    expect(fixture.host.sends).toHaveLength(0)
+
+    const invite = await fixture.gateway.createControllerInvite('CI', ['submit', 'control'], 60_000)
+    expect(await fixture.gateway.listControllers()).toMatchObject([{ id: invite.id, status: 'pending' }])
+    await fixture.gateway.authorizeController(invite.id)
+    expect(await fixture.gateway.listRequests()).toEqual([])
+    await inbound(fixture, fixture.gateway.topics.requests, submit('authorized', {
+      controller_id: invite.id,
+      token: invite.token,
+    }))
+    expect(fixture.host.sends).toHaveLength(1)
+
+    await inbound(fixture, fixture.gateway.topics.control('authorized'), {
+      ...control('authorized', 'authorized-cancel', 'request.cancel'),
+      controller_id: invite.id,
+      token: invite.token,
+    })
+    expect(fixture.host.cancellations).toEqual(['session-authorized'])
+    await fixture.gateway.revokeController(invite.id)
+    expect(await fixture.gateway.listControllers()).toMatchObject([{ id: invite.id, status: 'revoked' }])
+  })
+
   it('runs request → agent events → completed result end to end', async () => {
     const fixture = await setup()
     expect(fixture.transport.publications[0]).toMatchObject({

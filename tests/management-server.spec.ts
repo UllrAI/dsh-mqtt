@@ -1,0 +1,109 @@
+import { createServer } from 'node:net'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { resolveConfig } from '../src/config.ts'
+import type { MqttAgentGateway } from '../src/gateway.ts'
+import { ManagementServer } from '../src/management-server.ts'
+import type { Logger } from '../src/transport.ts'
+
+const servers: ManagementServer[] = []
+
+async function freePort(): Promise<number> {
+  const server = createServer()
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  const address = server.address()
+  if (address === null || typeof address === 'string') throw new Error('test server has no port')
+  await new Promise<void>(resolve => server.close(() => resolve()))
+  return address.port
+}
+
+function logger(): Logger {
+  return { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+}
+
+afterEach(async () => {
+  await Promise.all(servers.splice(0).map(server => server.stop()))
+})
+
+describe('ManagementServer', () => {
+  it('serves real status, safe config, controller, and request operations', async () => {
+    const port = await freePort()
+    const config = resolveConfig({
+      url: 'mqtt://broker.test:1883',
+      namespace: 'test',
+      nodeId: 'worker',
+      displayName: 'Build worker',
+      workspaces: { app: '/workspace/app' },
+      managementPort: port,
+    })
+    const invite = { id: 'controller-1', name: 'MacBook', scopes: ['submit'], token: 'secret', createdAt: 1, expiresAt: 2 }
+    const gateway = {
+      getStatus: vi.fn().mockResolvedValue({ type: 'node.status', state: 'ready' }),
+      listControllers: vi.fn().mockResolvedValue([]),
+      listRequests: vi.fn().mockResolvedValue([]),
+      createControllerInvite: vi.fn().mockResolvedValue(invite),
+      authorizeController: vi.fn().mockResolvedValue({ id: invite.id, status: 'authorized' }),
+      revokeController: vi.fn().mockResolvedValue({ id: invite.id, status: 'revoked' }),
+    } as unknown as MqttAgentGateway
+    const server = new ManagementServer({ gateway, config, logger: logger() })
+    servers.push(server)
+    await server.start()
+    await expect(server.start()).rejects.toThrow(/already started/)
+    const base = `http://127.0.0.1:${port}/api`
+
+    const html = await fetch(`http://127.0.0.1:${port}/`).then(response => response.text())
+    expect(html).toContain('<div id="root"></div>')
+    const asset = /src="([^"]+\.js)"/.exec(html)?.[1]
+    expect(asset).toBeDefined()
+    expect((await fetch(`http://127.0.0.1:${port}${asset}`).then(response => response.headers.get('content-type')))).toContain('javascript')
+    expect(await fetch(`http://127.0.0.1:${port}/settings/worker`).then(response => response.text())).toContain('<div id="root"></div>')
+    expect((await fetch(`http://127.0.0.1:${port}/missing.js`)).status).toBe(404)
+    expect(await fetch(`${base}/status`).then(response => response.json())).toMatchObject({ state: 'ready' })
+    expect(await fetch(`${base}/config`).then(response => response.json())).toEqual(expect.objectContaining({
+      display_name: 'Build worker',
+      workspaces: ['app'],
+    }))
+    const created = await fetch(`${base}/controllers/invites`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'MacBook', scopes: ['submit'] }),
+    }).then(response => response.json())
+    expect(created).toEqual({ invite })
+    expect(gateway.createControllerInvite).toHaveBeenCalledWith('MacBook', ['submit'], 600_000)
+    expect(await fetch(`${base}/controllers`).then(response => response.json())).toEqual({ controllers: [] })
+    expect(await fetch(`${base}/requests?limit=5`).then(response => response.json())).toEqual({ requests: [] })
+    expect(gateway.listRequests).toHaveBeenCalledWith(5)
+
+    await fetch(`${base}/controllers/${invite.id}/authorize`, { method: 'POST' })
+    expect(gateway.authorizeController).toHaveBeenCalledWith(invite.id)
+    await fetch(`${base}/controllers/${invite.id}`, { method: 'DELETE' })
+    expect(gateway.revokeController).toHaveBeenCalledWith(invite.id)
+    expect((await fetch(`${base}/missing`)).status).toBe(404)
+    expect((await fetch(`${base}/status`, { method: 'OPTIONS' })).status).toBe(204)
+    expect((await fetch(`${base}/controllers/invites`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '[]',
+    })).status).toBe(500)
+  })
+
+  it('requires a bearer token when management authentication is configured', async () => {
+    const port = await freePort()
+    const config = resolveConfig({
+      url: 'mqtt://127.0.0.1:1883',
+      namespace: 'test',
+      nodeId: 'worker',
+      managementPort: port,
+      managementToken: 'management-secret',
+    })
+    const gateway = { getStatus: vi.fn() } as unknown as MqttAgentGateway
+    const server = new ManagementServer({ gateway, config, logger: logger() })
+    servers.push(server)
+    await server.start()
+    const url = `http://127.0.0.1:${port}/api/status`
+    expect((await fetch(url)).status).toBe(401)
+    expect((await fetch(url, { headers: { authorization: 'Bearer management-secret' } })).status).toBe(200)
+  })
+})
