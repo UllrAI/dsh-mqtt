@@ -572,6 +572,17 @@ pnpm check
 pnpm pack
 ```
 
+### 发布自动化
+
+发布由 Git tag 驱动。先更新 `package.json` 和 `CHANGELOG.md`，提交后推送与版本一致的正式 tag：
+
+```sh
+git tag v0.1.1
+git push origin v0.1.1
+```
+
+`Release` 工作流会校验 tag 是否与 `package.json` 一致，使用锁文件安装依赖，运行完整的 `pnpm check`，发布 npm 包，并创建带自动生成说明的 GitHub Release。请在仓库 Secrets 中配置名为 `NPM_TOKEN` 的 npm granular automation token，并确保它有权发布 `dsh-mqtt`。在单独定义预发布策略前，工作流会拒绝预发布 tag。只有版本号、变更日志和发布内容都准备好后，才应创建 tag。
+
 公共模块会导出 Cordis 插件以及 `MqttAgentGateway`、`RequestStore` 和 `TopicLayout`。`dsh-mqtt/protocol` 会导出协议类型、解析器、指纹和信封构造函数。
 
 ## 当前限制
