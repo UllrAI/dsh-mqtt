@@ -125,8 +125,10 @@ export class MqttAgentGateway {
           if (this.stopping) return
           this.connectionState = state
           if (state === 'connecting') this.nodeState = 'connecting'
+          if (state === 'degraded') this.nodeState = 'degraded'
           if (state === 'offline') this.nodeState = 'offline'
           if (state === 'offline') await this.publishOfflineStatus()
+          else if (state === 'degraded') await this.publishOnlineStatus()
         }),
       })
     } catch (error) {
@@ -510,7 +512,7 @@ export class MqttAgentGateway {
   }
 
   private async publishOnlineStatus(): Promise<void> {
-    if (this.connectionState !== 'connected') return
+    if (this.connectionState !== 'connected' && this.connectionState !== 'degraded') return
     const status = await this.buildStatus()
     await this.transport.publish(this.topics.status, json(status), { qos: 1, retain: true })
   }
@@ -554,7 +556,7 @@ export class MqttAgentGateway {
     this.nodeState = this.stopping
       ? 'stopped'
       : this.connectionState !== 'connected'
-        ? this.connectionState === 'offline' ? 'offline' : this.connectionState === 'connecting' ? 'connecting' : 'starting'
+        ? this.connectionState === 'offline' ? 'offline' : this.connectionState === 'connecting' ? 'connecting' : 'degraded'
         : !allReady ? 'degraded' : activeRequests > 0 ? 'busy' : 'ready'
     const heartbeatAt = now.toISOString()
     return {

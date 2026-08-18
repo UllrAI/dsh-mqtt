@@ -16,7 +16,7 @@ export interface TransportHandlers {
   onState?(state: TransportState): void | Promise<void>
 }
 
-export type TransportState = 'connecting' | 'connected' | 'offline' | 'stopped'
+export type TransportState = 'connecting' | 'connected' | 'degraded' | 'offline' | 'stopped'
 
 export interface GatewayTransport {
   start(handlers: TransportHandlers): Promise<void>

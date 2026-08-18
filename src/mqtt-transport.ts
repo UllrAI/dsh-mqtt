@@ -115,6 +115,7 @@ export class MqttTransport implements GatewayTransport {
           if (this.stopping || generation !== this.connectGeneration) return
           const reason = error instanceof Error ? error : new Error(String(error))
           logger.error('dsh-mqtt: failed to initialize broker subscription', reason)
+          await this.notifyState(handlers, 'degraded')
         }
       }).catch(error => {
         if (!this.stopping && generation === this.connectGeneration) {
