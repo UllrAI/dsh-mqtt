@@ -7,7 +7,7 @@
 `dsh-mqtt` 可以把一个 DSH 进程变成可通过 MQTT 寻址的 Agent Worker。客户端能够提交任务、观察规范化后的执行事件、对正在运行的回合执行 steer 或 inject、取消任务，并取得有关联 ID 的最终结果。DSH 主机只需主动连接 Broker，因此即使 Worker 位于 NAT 或防火墙之后，也不必对外暴露 HTTP Server。
 
 > [!IMPORTANT]
-> `0.1.0` 是首个 npm 发行版，目前适配 DSH `0.1.0-rc.7`。DSH 本身仍处于 developer preview 阶段，后续可能有破坏性变更。
+> `0.1.1` 新增真实 Worker 管理界面与控制端授权，目前适配 DSH `0.1.0-rc.7`。DSH 本身仍处于 developer preview 阶段，后续可能有破坏性变更。
 
 ## 已实现能力
 
@@ -98,7 +98,7 @@ DSH 按 profile 安装插件。第一次使用建议装到 `web` profile，这�
 从 npm 安装：
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web add dsh-mqtt@0.1.0
+npx @deepseek-ai/dsh plugin --profile web add dsh-mqtt@0.1.1
 ```
 
 从本地源码安装：
@@ -171,7 +171,7 @@ http://127.0.0.1:3210/
 
 这里显示的 Broker、Agent、模型、工作区和任务容量均来自 Gateway 实时检查，不使用演示数据。页面可以生成控制端邀请、确认授权、查看最近使用时间并撤销控制端。设置 `managementPort: 0` 可以关闭管理界面。
 
-管理服务默认只绑定 loopback。若把 `managementHost` 设置为 `0.0.0.0` 或其他非本机地址，必须同时设置 `managementToken` 或 `managementTokenEnv`；浏览器和 API 调用需要发送 `Authorization: Bearer <token>`。不要把未认证的管理端口暴露到局域网或互联网。
+管理服务默认只绑定 loopback。若把 `managementHost` 设置为 `0.0.0.0` 或其他非本机地址，必须同时设置 `managementToken` 或 `managementTokenEnv`；界面会要求输入 token，并且只在当前浏览器会话中保存，API 调用则需发送 `Authorization: Bearer <token>`。除非显式设置 `managementCorsOrigin`，否则管理 API 不允许跨域访问。不要把未认证的管理端口暴露到局域网或互联网。
 
 ### 添加控制端
 
@@ -431,7 +431,7 @@ dsh/v1/{namespace}/nodes/{nodeId}/status
   "request_capacity": 16,
   "workspaces": [{ "alias": "repo-foo", "status": "ready" }],
   "controller_auth_required": true,
-  "gateway_version": "0.1.0",
+  "gateway_version": "0.1.1",
   "protocol_version": 1,
   "capabilities": ["coding"],
   "health": [

@@ -4,7 +4,29 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## 0.1.1 - 2026-08-18
+
+### Added
+
+- Live Worker status with heartbeat expiry, health checks, capacity, and explicit starting, connecting, ready, busy, degraded, offline, and stopped states.
+- A packaged Worker management UI for live status, safe configuration summaries, controller invitations, approvals, and revocation.
+- Persistent controller authorization with expiring invitations, scoped tokens, SHA-256 token hashes at rest, and optional enforcement for submit and control messages.
+- `MqttControllerClient` for authenticated submissions, controls, events, status updates, and terminal results.
+
+### Changed
+
 - Keep DSH Host startup independent from the broker's initial CONNACK; unavailable brokers now reconnect in the background instead of preventing the plugin tree from loading.
+- Report broker subscription or ACL initialization failures as degraded instead of incorrectly reporting the Worker as ready.
+
+### Fixed
+
+- Allow the protected management UI shell to load before API authentication, then accept the management token from a session-only browser form.
+- Return client-error status codes for malformed management requests and clean up the Gateway if the management listener cannot start.
+
+### Security
+
+- Disable cross-origin management API access by default; deployments must opt in with `managementCorsOrigin`.
+- Require a management token for non-loopback listeners and never embed that token into the packaged UI.
 
 ## 0.1.0 - 2026-08-18
 

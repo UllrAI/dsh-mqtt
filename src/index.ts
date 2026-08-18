@@ -56,7 +56,12 @@ export async function apply(ctx: Context, input: PluginConfig): Promise<void> {
 
   await ctx.effect(async () => {
     await gateway.start()
-    await management.start()
+    try {
+      await management.start()
+    } catch (error) {
+      await gateway.stop().catch(stopError => logger.warn('dsh-mqtt: failed to stop gateway after management startup failed', stopError))
+      throw error
+    }
     return async () => {
       await management.stop()
       await gateway.stop()

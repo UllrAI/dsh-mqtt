@@ -7,7 +7,7 @@ MQTT protocol driver and agent worker gateway for [DeepSeek Harness (DSH)](https
 `dsh-mqtt` turns a DSH process into an MQTT-addressable agent worker. A client can submit work, observe normalized execution events, steer or inject context into a running turn, cancel it, and receive a correlated final result. The DSH host only makes an outbound broker connection, so the worker can stay behind NAT or a firewall without exposing an HTTP server.
 
 > [!IMPORTANT]
-> Version `0.1.0` is the first npm release and currently targets DSH `0.1.0-rc.7`. DSH itself is a developer preview and may introduce breaking changes.
+> Version `0.1.1` adds the live Worker management UI and controller authorization, and currently targets DSH `0.1.0-rc.7`. DSH itself is a developer preview and may introduce breaking changes.
 
 ## What it provides
 
@@ -98,7 +98,7 @@ DSH installs plugins into a profile. The `web` profile is convenient for a first
 From npm:
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web add dsh-mqtt@0.1.0
+npx @deepseek-ai/dsh plugin --profile web add dsh-mqtt@0.1.1
 ```
 
 From a local checkout:
@@ -171,7 +171,7 @@ http://127.0.0.1:3210/
 
 Broker, Agent, model, workspace, and capacity data come from live Gateway checks. The UI creates controller invitations, approves access, reports last use, and revokes controllers. Set `managementPort: 0` to disable it.
 
-The management server binds to loopback by default. A non-loopback `managementHost` requires `managementToken` or `managementTokenEnv`; clients must send `Authorization: Bearer <token>`. Never expose an unauthenticated management endpoint to a network.
+The management server binds to loopback by default. A non-loopback `managementHost` requires `managementToken` or `managementTokenEnv`; the UI asks for that token and keeps it only for the current browser session, while API clients send `Authorization: Bearer <token>`. Cross-origin API access is disabled unless `managementCorsOrigin` is set explicitly. Never expose an unauthenticated management endpoint to a network.
 
 ### Add a controller
 
@@ -431,7 +431,7 @@ The gateway publishes retained online status after each successful connection:
   "request_capacity": 16,
   "workspaces": [{ "alias": "repo-foo", "status": "ready" }],
   "controller_auth_required": true,
-  "gateway_version": "0.1.0",
+  "gateway_version": "0.1.1",
   "protocol_version": 1,
   "capabilities": ["coding"],
   "health": [

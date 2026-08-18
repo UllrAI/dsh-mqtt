@@ -18,7 +18,7 @@ import { RequestStore, type ControllerInvite, type ControllerSummary, type Store
 import { TopicLayout } from './topics.ts'
 import type { GatewayTransport, IncomingMessage, Logger, TransportState } from './transport.ts'
 
-const GATEWAY_VERSION = '0.1.0'
+const GATEWAY_VERSION = '0.1.1'
 const SUMMARY_LIMIT = 8_000
 
 export type NodeState = 'starting' | 'connecting' | 'ready' | 'busy' | 'degraded' | 'offline' | 'stopped'

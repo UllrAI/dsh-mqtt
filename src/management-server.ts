@@ -25,18 +25,32 @@ function json(value: unknown): string {
   return JSON.stringify(value)
 }
 
+class ManagementHttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message)
+  }
+}
+
 async function readJson(request: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = []
   let size = 0
   for await (const chunk of request) {
     const bytes = Buffer.from(chunk as Uint8Array)
     size += bytes.byteLength
-    if (size > 64 * 1024) throw new Error('request body exceeds 64 KiB')
+    if (size > 64 * 1024) throw new ManagementHttpError(413, 'request body exceeds 64 KiB')
     chunks.push(bytes)
   }
   if (chunks.length === 0) return {}
-  const value: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('request body must be a JSON object')
+  let value: unknown
+  try {
+    value = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown
+  } catch {
+    throw new ManagementHttpError(400, 'request body must be valid JSON')
+  }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new ManagementHttpError(400, 'request body must be a JSON object')
   return value as Record<string, unknown>
 }
 
@@ -44,13 +58,23 @@ function requestPath(request: IncomingMessage): URL {
   return new URL(request.url ?? '/', 'http://dsh-mqtt.local')
 }
 
+function decodeSegment(value: string): string {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    throw new ManagementHttpError(400, 'invalid path segment')
+  }
+}
+
 function writeJson(response: ServerResponse, status: number, value: unknown, origin: string | undefined): void {
   response.statusCode = status
   response.setHeader('content-type', 'application/json; charset=utf-8')
   response.setHeader('cache-control', 'no-store')
-  response.setHeader('access-control-allow-origin', origin ?? '*')
-  response.setHeader('access-control-allow-methods', 'GET,POST,DELETE,OPTIONS')
-  response.setHeader('access-control-allow-headers', 'content-type,authorization')
+  if (origin !== undefined) {
+    response.setHeader('access-control-allow-origin', origin)
+    response.setHeader('access-control-allow-methods', 'GET,POST,DELETE,OPTIONS')
+    response.setHeader('access-control-allow-headers', 'content-type,authorization')
+  }
   response.end(json(value))
 }
 
@@ -75,17 +99,23 @@ export class ManagementServer {
           response.destroy(error instanceof Error ? error : undefined)
           return
         }
-        writeJson(response, 500, { error: error instanceof Error ? error.message : String(error) }, config.managementCorsOrigin)
+        const status = error instanceof ManagementHttpError ? error.status : 500
+        writeJson(response, status, { error: error instanceof Error ? error.message : String(error) }, config.managementCorsOrigin)
       })
     })
     this.server = server
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject)
-      server.listen(config.managementPort, config.managementHost, () => {
-        server.off('error', reject)
-        resolve()
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject)
+        server.listen(config.managementPort, config.managementHost, () => {
+          server.off('error', reject)
+          resolve()
+        })
       })
-    })
+    } catch (error) {
+      this.server = undefined
+      throw error
+    }
     const address = server.address()
     logger.info(`dsh-mqtt management UI API listening at ${typeof address === 'object' && address !== null ? `http://${config.managementHost}:${address.port}` : 'configured endpoint'}`)
   }
@@ -99,17 +129,17 @@ export class ManagementServer {
 
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const { config, gateway } = this.options
+    const url = requestPath(request)
+    if (!url.pathname.startsWith('/api/')) {
+      await this.serveUi(url.pathname, response)
+      return
+    }
     if (request.method === 'OPTIONS') {
       writeJson(response, 204, {}, config.managementCorsOrigin)
       return
     }
     if (!authAllowed(request, config.managementToken)) {
       writeJson(response, 401, { error: 'management authorization required' }, config.managementCorsOrigin)
-      return
-    }
-    const url = requestPath(request)
-    if (!url.pathname.startsWith('/api/')) {
-      await this.serveUi(url.pathname, response)
       return
     }
     if (request.method === 'GET' && url.pathname === '/api/status') {
@@ -140,10 +170,12 @@ export class ManagementServer {
     }
     if (request.method === 'POST' && url.pathname === '/api/controllers/invites') {
       const body = await readJson(request)
-      const name = typeof body.name === 'string' ? body.name : ''
-      const scopes = Array.isArray(body.scopes) && body.scopes.every(scope => typeof scope === 'string')
-        ? body.scopes as string[]
-        : ['submit', 'control']
+      const name = typeof body.name === 'string' ? body.name.trim() : ''
+      if (name.length === 0 || name.length > 128) throw new ManagementHttpError(400, 'name must contain 1 to 128 characters')
+      if (body.scopes !== undefined && (!Array.isArray(body.scopes) || !body.scopes.every(scope => typeof scope === 'string'))) {
+        throw new ManagementHttpError(400, 'scopes must be an array of strings')
+      }
+      const scopes = body.scopes === undefined ? ['submit', 'control'] : body.scopes as string[]
       const ttlSeconds = typeof body.ttl_seconds === 'number' && Number.isFinite(body.ttl_seconds)
         ? Math.max(60, Math.min(86_400, Math.floor(body.ttl_seconds)))
         : 600
@@ -153,12 +185,12 @@ export class ManagementServer {
     }
     const authorizeMatch = /^\/api\/controllers\/([^/]+)\/authorize$/.exec(url.pathname)
     if (authorizeMatch !== null && request.method === 'POST') {
-      writeJson(response, 200, { controller: await gateway.authorizeController(decodeURIComponent(authorizeMatch[1] as string)) }, config.managementCorsOrigin)
+      writeJson(response, 200, { controller: await gateway.authorizeController(decodeSegment(authorizeMatch[1] as string)) }, config.managementCorsOrigin)
       return
     }
     const controllerMatch = /^\/api\/controllers\/([^/]+)$/.exec(url.pathname)
     if (controllerMatch !== null && request.method === 'DELETE') {
-      writeJson(response, 200, { controller: await gateway.revokeController(decodeURIComponent(controllerMatch[1] as string)) }, config.managementCorsOrigin)
+      writeJson(response, 200, { controller: await gateway.revokeController(decodeSegment(controllerMatch[1] as string)) }, config.managementCorsOrigin)
       return
     }
     writeJson(response, 404, { error: 'not found' }, config.managementCorsOrigin)
