@@ -1,4 +1,5 @@
 import { constants } from 'node:fs'
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { access, chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { isRfc3339DateTime, type GatewayResult } from './protocol.ts'
@@ -23,10 +24,45 @@ export interface StoredRequest {
   controls: Record<string, StoredControl>
 }
 
+export type StoredControllerStatus = 'pending' | 'authorized' | 'revoked'
+
+export interface StoredController {
+  id: string
+  name: string
+  scopes: string[]
+  status: StoredControllerStatus
+  tokenHash: string
+  createdAt: number
+  updatedAt: number
+  expiresAt: number
+  lastUsedAt?: number
+}
+
+export interface ControllerSummary {
+  id: string
+  name: string
+  scopes: string[]
+  status: StoredControllerStatus
+  createdAt: number
+  updatedAt: number
+  expiresAt: number
+  lastUsedAt?: number
+}
+
+export interface ControllerInvite {
+  id: string
+  name: string
+  scopes: string[]
+  token: string
+  createdAt: number
+  expiresAt: number
+}
+
 interface StateFile {
   version: 1
   requests: Record<string, StoredRequest>
   sessions: string[]
+  controllers?: Record<string, StoredController>
 }
 
 export type ReserveResult =
@@ -46,7 +82,12 @@ function isTerminal(status: StoredStatus): boolean {
 }
 
 function emptyState(): StateFile {
-  return { version: 1, requests: Object.create(null) as Record<string, StoredRequest>, sessions: [] }
+  return {
+    version: 1,
+    requests: Object.create(null) as Record<string, StoredRequest>,
+    sessions: [],
+    controllers: Object.create(null) as Record<string, StoredController>,
+  }
 }
 
 const STORED_STATUSES = new Set<StoredStatus>(['accepted', 'active', 'completed', 'failed', 'cancelled'])
@@ -59,6 +100,25 @@ function plainObject(value: unknown): value is Record<string, unknown> {
 
 function safeTimestamp(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+const CONTROLLER_STATUSES = new Set<StoredControllerStatus>(['pending', 'authorized', 'revoked'])
+
+function tokenHash(token: string): string {
+  return createHash('sha256').update(token).digest('hex')
+}
+
+function controllerSummary(controller: StoredController): ControllerSummary {
+  return {
+    id: controller.id,
+    name: controller.name,
+    scopes: [...controller.scopes],
+    status: controller.status,
+    createdAt: controller.createdAt,
+    updatedAt: controller.updatedAt,
+    expiresAt: controller.expiresAt,
+    ...controller.lastUsedAt === undefined ? {} : { lastUsedAt: controller.lastUsedAt },
+  }
 }
 
 function assertResult(value: unknown, id: string, status: StoredStatus): GatewayResult {
@@ -91,6 +151,7 @@ function assertState(value: unknown): StateFile {
   }
   const requests = Object.create(null) as Record<string, StoredRequest>
   const sessions = new Set<string>()
+  const controllers = Object.create(null) as Record<string, StoredController>
   for (const sessionId of candidate.sessions ?? []) {
     if (typeof sessionId !== 'string' || !isRequestId(sessionId)) {
       throw new Error('dsh-mqtt state file contains an invalid session id')
@@ -135,7 +196,32 @@ function assertState(value: unknown): StateFile {
     requests[id] = normalized
     if (normalized.sessionId !== undefined) sessions.add(normalized.sessionId)
   }
-  return { version: 1, requests, sessions: [...sessions] }
+  for (const [id, controller] of Object.entries(candidate.controllers ?? {})) {
+    if (!isRequestId(id) || !plainObject(controller)) {
+      throw new Error(`dsh-mqtt controller ${JSON.stringify(id)} is invalid`)
+    }
+    const row = controller as Partial<StoredController>
+    if (row.id !== id || typeof row.name !== 'string' || row.name.length === 0 || row.name.length > 128
+      || !Array.isArray(row.scopes) || row.scopes.some(scope => typeof scope !== 'string' || scope.length === 0 || scope.length > 64)
+      || typeof row.status !== 'string' || !CONTROLLER_STATUSES.has(row.status as StoredControllerStatus)
+      || typeof row.tokenHash !== 'string' || !/^[a-f0-9]{64}$/.test(row.tokenHash)
+      || !safeTimestamp(row.createdAt) || !safeTimestamp(row.updatedAt) || !safeTimestamp(row.expiresAt)
+      || (row.lastUsedAt !== undefined && !safeTimestamp(row.lastUsedAt))) {
+      throw new Error(`dsh-mqtt controller ${JSON.stringify(id)} is invalid`)
+    }
+    controllers[id] = {
+      id,
+      name: row.name,
+      scopes: [...row.scopes],
+      status: row.status as StoredControllerStatus,
+      tokenHash: row.tokenHash,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+      expiresAt: row.expiresAt,
+      ...row.lastUsedAt === undefined ? {} : { lastUsedAt: row.lastUsedAt },
+    }
+  }
+  return { version: 1, requests, sessions: [...sessions], controllers }
 }
 
 function clone<T>(value: T): T {
@@ -240,12 +326,95 @@ export class RequestStore {
     })
   }
 
+  async list(options: { limit?: number } = {}): Promise<StoredRequest[]> {
+    const limit = Math.max(1, Math.min(options.limit ?? 100, 1_000))
+    return this.read(() => Object.values(this.state.requests)
+      .sort((left, right) => right.updatedAt - left.updatedAt)
+      .slice(0, limit)
+      .map(clone))
+  }
+
   async activeCount(): Promise<number> {
     return this.read(() => Object.values(this.state.requests).filter(record => !isTerminal(record.status)).length)
   }
 
   async hasSession(sessionId: string): Promise<boolean> {
     return this.read(() => this.state.sessions.includes(sessionId))
+  }
+
+  async createController(name: string, scopes: string[], ttlMs: number): Promise<ControllerInvite> {
+    if (name.length === 0 || name.length > 128) throw new Error('controller name must contain 1 to 128 characters')
+    if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0) throw new Error('controller invite ttl must be a positive integer')
+    if (scopes.length === 0 || scopes.length > 32 || scopes.some(scope => scope.length === 0 || scope.length > 64)) {
+      throw new Error('controller scopes must contain 1 to 32 values of 1 to 64 characters')
+    }
+    return this.mutate(() => {
+      const now = this.now()
+      const id = `controller-${randomBytes(12).toString('hex')}`
+      const token = randomBytes(32).toString('base64url')
+      const expiresAt = now + ttlMs
+      const controller: StoredController = {
+        id,
+        name,
+        scopes: [...new Set(scopes)],
+        status: 'pending',
+        tokenHash: tokenHash(token),
+        createdAt: now,
+        updatedAt: now,
+        expiresAt,
+      }
+      this.state.controllers ??= Object.create(null) as Record<string, StoredController>
+      this.state.controllers[id] = controller
+      return { id, name, scopes: [...controller.scopes], token, createdAt: now, expiresAt }
+    })
+  }
+
+  async listControllers(): Promise<ControllerSummary[]> {
+    return this.read(() => Object.values(this.state.controllers ?? {})
+      .sort((left, right) => right.updatedAt - left.updatedAt)
+      .map(controllerSummary))
+  }
+
+  async authorizeController(id: string): Promise<ControllerSummary> {
+    return this.mutate(() => {
+      const controller = this.requireController(id)
+      if (controller.expiresAt <= this.now()) throw new Error('controller invite has expired')
+      controller.status = 'authorized'
+      controller.updatedAt = this.now()
+      return controllerSummary(controller)
+    })
+  }
+
+  async revokeController(id: string): Promise<ControllerSummary> {
+    return this.mutate(() => {
+      const controller = this.requireController(id)
+      controller.status = 'revoked'
+      controller.updatedAt = this.now()
+      return controllerSummary(controller)
+    })
+  }
+
+  async authenticateController(id: string, token: string, scope: string): Promise<
+    { ok: true; controller: ControllerSummary } | { ok: false; reason: 'not-found' | 'pending' | 'revoked' | 'expired' | 'invalid-token' | 'scope-denied' }
+  > {
+    return this.mutate(() => {
+      const controller = this.state.controllers?.[id]
+      if (controller === undefined) return { ok: false, reason: 'not-found' as const }
+      if (controller.status === 'pending') return { ok: false, reason: 'pending' as const }
+      if (controller.status === 'revoked') return { ok: false, reason: 'revoked' as const }
+      if (controller.expiresAt <= this.now()) return { ok: false, reason: 'expired' as const }
+      const expected = Buffer.from(controller.tokenHash, 'utf8')
+      const actual = Buffer.from(tokenHash(token), 'utf8')
+      if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
+        return { ok: false, reason: 'invalid-token' as const }
+      }
+      if (!controller.scopes.includes(scope) && !controller.scopes.includes('*')) {
+        return { ok: false, reason: 'scope-denied' as const }
+      }
+      controller.lastUsedAt = this.now()
+      controller.updatedAt = controller.lastUsedAt
+      return { ok: true as const, controller: controllerSummary(controller) }
+    })
   }
 
   async recoverInterrupted(makeResult: (record: StoredRequest) => GatewayResult): Promise<StoredRequest[]> {
@@ -271,6 +440,12 @@ export class RequestStore {
     const record = this.state.requests[id]
     if (record === undefined) throw new Error(`unknown request ${id}`)
     return record
+  }
+
+  private requireController(id: string): StoredController {
+    const controller = this.state.controllers?.[id]
+    if (controller === undefined) throw new Error(`unknown controller ${id}`)
+    return controller
   }
 
   private touch(record: StoredRequest): void {

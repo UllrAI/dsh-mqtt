@@ -13,6 +13,7 @@ import { DshAgentHost } from './agent-host.ts'
 import { Config, resolveConfig, type Config as PluginConfig } from './config.ts'
 import { MqttAgentGateway, offlineStatus } from './gateway.ts'
 import { MqttTransport } from './mqtt-transport.ts'
+import { ManagementServer } from './management-server.ts'
 import { RequestStore } from './state-store.ts'
 import { TopicLayout } from './topics.ts'
 import type { Logger } from './transport.ts'
@@ -22,6 +23,9 @@ export type { Config as PluginConfig, ResolvedConfig } from './config.ts'
 export { MqttAgentGateway } from './gateway.ts'
 export { RequestStore } from './state-store.ts'
 export { TopicLayout } from './topics.ts'
+export { ManagementServer } from './management-server.ts'
+export { MqttControllerClient } from './controller.ts'
+export type { ControllerInviteConfig, SubmitOptions } from './controller.ts'
 
 export const name = 'dsh-mqtt'
 export const inject = ['agentDefaultModel', 'agents']
@@ -48,9 +52,14 @@ export async function apply(ctx: Context, input: PluginConfig): Promise<void> {
     logger,
   })
   const gateway = new MqttAgentGateway(config, transport, host, store, logger)
+  const management = new ManagementServer({ gateway, config, logger })
 
   await ctx.effect(async () => {
     await gateway.start()
-    return () => gateway.stop()
+    await management.start()
+    return async () => {
+      await management.stop()
+      await gateway.stop()
+    }
   }, 'dsh-mqtt.gateway')
 }

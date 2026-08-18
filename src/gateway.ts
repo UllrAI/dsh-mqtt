@@ -1,4 +1,4 @@
-import type { AgentErrorEvent, AgentStatusEvent, GatewayAgentHost } from './agent-host.ts'
+import type { AgentErrorEvent, AgentHostHealth, AgentStatusEvent, GatewayAgentHost } from './agent-host.ts'
 import type { ResolvedConfig } from './config.ts'
 import { errorMessage, normalizeSessionEvent } from './event-normalizer.ts'
 import {
@@ -14,12 +14,40 @@ import {
   type GatewayResult,
   type SubmitRequest,
 } from './protocol.ts'
-import { RequestStore } from './state-store.ts'
+import { RequestStore, type ControllerInvite, type ControllerSummary, type StoredRequest } from './state-store.ts'
 import { TopicLayout } from './topics.ts'
-import type { GatewayTransport, IncomingMessage, Logger } from './transport.ts'
+import type { GatewayTransport, IncomingMessage, Logger, TransportState } from './transport.ts'
 
 const GATEWAY_VERSION = '0.1.0'
 const SUMMARY_LIMIT = 8_000
+
+export type NodeState = 'starting' | 'connecting' | 'ready' | 'busy' | 'degraded' | 'offline' | 'stopped'
+
+export interface NodeHealthCheck {
+  name: string
+  status: 'ready' | 'degraded' | 'offline'
+  message?: string
+}
+
+export interface NodeStatus {
+  version: 1
+  type: 'node.status'
+  timestamp: string
+  heartbeat_at: string
+  expires_at: string
+  node_id: string
+  display_name: string
+  state: NodeState
+  online: boolean
+  gateway_version: string
+  protocol_version: 1
+  capabilities: readonly string[]
+  workspaces: Array<{ alias: string; status: AgentHostHealth['workspaces'][number]['status'] }>
+  active_requests: number
+  request_capacity: number
+  controller_auth_required: boolean
+  health: NodeHealthCheck[]
+}
 
 interface ActiveRequest {
   id: string
@@ -54,6 +82,9 @@ export class MqttAgentGateway {
   private readonly requestBySession = new Map<string, string>()
   private operationQueue: Promise<void> = Promise.resolve()
   private stopping = false
+  private connectionState: TransportState = 'offline'
+  private nodeState: NodeState = 'starting'
+  private heartbeatTimer: ReturnType<typeof setInterval> | undefined
 
   constructor(
     private readonly config: ResolvedConfig,
@@ -83,23 +114,35 @@ export class MqttAgentGateway {
         onMessage: message => this.enqueue(() => this.handleMessage(message)),
         onConnect: async () => {
           if (this.stopping) return
+          this.connectionState = 'connected'
           await this.publishOnlineStatus()
           for (const record of recovered) {
             if (record.result !== undefined) await this.publishResult(record.result)
           }
           recovered.length = 0
         },
+        onState: state => this.enqueue(async () => {
+          if (this.stopping) return
+          this.connectionState = state
+          if (state === 'connecting') this.nodeState = 'connecting'
+          if (state === 'offline') this.nodeState = 'offline'
+          if (state === 'offline') await this.publishOfflineStatus()
+        }),
       })
     } catch (error) {
       await Promise.allSettled([this.host.dispose(), this.store.close()])
       throw error
     }
-    this.logger.info(`dsh-mqtt: gateway online at ${this.topics.base}`)
+    this.heartbeatTimer = setInterval(() => {
+      void this.enqueue(() => this.publishOnlineStatus())
+    }, this.config.heartbeatSeconds * 1_000)
+    this.logger.info(`dsh-mqtt: gateway started at ${this.topics.base}`)
   }
 
   async stop(): Promise<void> {
     if (this.stopping) return
     this.stopping = true
+    if (this.heartbeatTimer !== undefined) clearInterval(this.heartbeatTimer)
     await this.enqueue(async () => {
       for (const request of this.active.values()) {
         try {
@@ -125,6 +168,30 @@ export class MqttAgentGateway {
 
   async whenIdle(): Promise<void> {
     await this.operationQueue
+  }
+
+  async getStatus(): Promise<NodeStatus> {
+    return this.buildStatus()
+  }
+
+  async listRequests(limit = 100): Promise<StoredRequest[]> {
+    return this.store.list({ limit })
+  }
+
+  async listControllers(): Promise<ControllerSummary[]> {
+    return this.store.listControllers()
+  }
+
+  async createControllerInvite(name: string, scopes: string[], ttlMs: number): Promise<ControllerInvite> {
+    return this.store.createController(name, scopes, ttlMs)
+  }
+
+  async authorizeController(id: string): Promise<ControllerSummary> {
+    return this.store.authorizeController(id)
+  }
+
+  async revokeController(id: string): Promise<ControllerSummary> {
+    return this.store.revokeController(id)
   }
 
   private enqueue(operation: () => void | Promise<void>): Promise<void> {
@@ -157,6 +224,12 @@ export class MqttAgentGateway {
       await this.publishResult(protocolResult(request.id, 'failed', {
         error: gatewayError('RETAINED_COMMAND', 'retained request messages are never executed'),
       }))
+      return
+    }
+
+    const authorization = await this.authorize(request.controller_id, request.token, 'submit')
+    if (!authorization.ok) {
+      await this.failUnauthenticated(request.id, authorization.reason)
       return
     }
 
@@ -217,6 +290,7 @@ export class MqttAgentGateway {
       await this.store.activate(request.id, lease.sessionId)
       await this.publishEvent(request.id, 'request.session', { session_id: lease.sessionId })
       this.host.send(lease.sessionId, 'followup', request.input)
+      await this.publishOnlineStatus()
     } catch (error) {
       const code = error !== null && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
         ? error.code
@@ -241,6 +315,15 @@ export class MqttAgentGateway {
       await this.publishEvent(requestId, 'request.control.rejected', {
         command_id: control.command_id,
         error: gatewayError('RETAINED_COMMAND', 'retained control messages are never executed'),
+      })
+      return
+    }
+
+    const authorization = await this.authorize(control.controller_id, control.token, 'control')
+    if (!authorization.ok) {
+      await this.publishEvent(requestId, 'request.control.rejected', {
+        command_id: control.command_id,
+        error: gatewayError('AUTH_REQUIRED', authorization.reason),
       })
       return
     }
@@ -288,6 +371,7 @@ export class MqttAgentGateway {
         command_id: control.command_id,
         action: control.type,
       })
+      await this.publishOnlineStatus()
     } catch (error) {
       await this.publishEvent(requestId, 'request.control.failed', {
         command_id: control.command_id,
@@ -361,6 +445,7 @@ export class MqttAgentGateway {
     })
     await this.store.finish(active.id, result)
     await this.publishResult(result)
+    await this.publishOnlineStatus()
   }
 
   private async failReserved(id: string, code: string, message: string, retryable = false): Promise<void> {
@@ -377,6 +462,33 @@ export class MqttAgentGateway {
     })
     await this.store.finish(id, result)
     await this.publishResult(result)
+    await this.publishOnlineStatus()
+  }
+
+  private async failUnauthenticated(id: string, reason: string): Promise<void> {
+    await this.publishResult(protocolResult(id, 'failed', {
+      error: gatewayError('AUTH_REQUIRED', reason),
+    }))
+  }
+
+  private async authorize(controllerId: string | undefined, token: string | undefined, scope: string): Promise<
+    { ok: true } | { ok: false; reason: string }
+  > {
+    if (!this.config.requireControllerAuth) return { ok: true }
+    if (controllerId === undefined || token === undefined) {
+      return { ok: false, reason: 'a controller id and token are required' }
+    }
+    const result = await this.store.authenticateController(controllerId, token, scope)
+    if (result.ok) return { ok: true }
+    const messages: Record<typeof result.reason, string> = {
+      'not-found': 'controller is not authorized',
+      pending: 'controller approval is still pending',
+      revoked: 'controller has been revoked',
+      expired: 'controller authorization has expired',
+      'invalid-token': 'controller token is invalid',
+      'scope-denied': `controller is not allowed to ${scope}`,
+    }
+    return { ok: false, reason: messages[result.reason] }
   }
 
   private async handleProtocolError(error: unknown): Promise<void> {
@@ -398,26 +510,72 @@ export class MqttAgentGateway {
   }
 
   private async publishOnlineStatus(): Promise<void> {
-    await this.transport.publish(this.topics.status, json({
-      version: 1,
-      type: 'node.status',
-      timestamp: new Date().toISOString(),
-      node_id: this.config.nodeId,
-      online: true,
-      gateway_version: GATEWAY_VERSION,
-      capabilities: this.config.capabilities,
-    }), { qos: 1, retain: true })
+    if (this.connectionState !== 'connected') return
+    const status = await this.buildStatus()
+    await this.transport.publish(this.topics.status, json(status), { qos: 1, retain: true })
   }
 
   private async publishOfflineStatus(): Promise<void> {
-    await this.transport.publish(this.topics.status, json({
+    this.nodeState = 'offline'
+    if (this.connectionState !== 'connected' && !this.stopping) return
+    const status = await this.buildStatus()
+    await this.transport.publish(this.topics.status, json(status), { qos: 1, retain: true })
+  }
+
+  private async buildStatus(): Promise<NodeStatus> {
+    const now = new Date()
+    const health: NodeHealthCheck[] = [{
+      name: 'broker',
+      status: this.connectionState === 'connected' ? 'ready' : this.connectionState === 'offline' ? 'offline' : 'degraded',
+      ...this.connectionState === 'connected' ? {} : { message: `broker is ${this.connectionState}` },
+    }]
+    let hostHealth: AgentHostHealth
+    try {
+      hostHealth = await this.host.health()
+      health.push({
+        name: 'agent',
+        status: hostHealth.agent === 'ready' ? 'ready' : 'degraded',
+        ...hostHealth.error === undefined ? {} : { message: hostHealth.error },
+      })
+      health.push({ name: 'model', status: hostHealth.model === 'ready' ? 'ready' : 'degraded' })
+      for (const workspace of hostHealth.workspaces) {
+        health.push({
+          name: `workspace:${workspace.alias}`,
+          status: workspace.status === 'ready' ? 'ready' : 'degraded',
+          ...workspace.status === 'ready' ? {} : { message: workspace.status },
+        })
+      }
+    } catch (error) {
+      hostHealth = { agent: 'degraded', model: 'unavailable', workspaces: [], error: errorMessage(error) }
+      health.push({ name: 'agent', status: 'degraded', ...hostHealth.error === undefined ? {} : { message: hostHealth.error } })
+    }
+    const activeRequests = this.active.size
+    const allReady = this.connectionState === 'connected' && health.every(item => item.status === 'ready')
+    this.nodeState = this.stopping
+      ? 'stopped'
+      : this.connectionState !== 'connected'
+        ? this.connectionState === 'offline' ? 'offline' : this.connectionState === 'connecting' ? 'connecting' : 'starting'
+        : !allReady ? 'degraded' : activeRequests > 0 ? 'busy' : 'ready'
+    const heartbeatAt = now.toISOString()
+    return {
       version: 1,
       type: 'node.status',
-      timestamp: new Date().toISOString(),
+      timestamp: heartbeatAt,
+      heartbeat_at: heartbeatAt,
+      expires_at: new Date(now.getTime() + this.config.heartbeatSeconds * 2_000).toISOString(),
       node_id: this.config.nodeId,
-      online: false,
+      display_name: this.config.displayName,
+      state: this.nodeState,
+      online: this.nodeState === 'ready' || this.nodeState === 'busy' || this.nodeState === 'degraded',
       gateway_version: GATEWAY_VERSION,
-    }), { qos: 1, retain: true })
+      protocol_version: 1,
+      capabilities: this.config.capabilities,
+      workspaces: hostHealth.workspaces.map(workspace => ({ alias: workspace.alias, status: workspace.status })),
+      active_requests: activeRequests,
+      request_capacity: this.config.limits.maxActiveRequests,
+      controller_auth_required: this.config.requireControllerAuth,
+      health,
+    }
   }
 }
 
@@ -427,7 +585,10 @@ export function offlineStatus(config: ResolvedConfig): string {
     type: 'node.status',
     timestamp: new Date().toISOString(),
     node_id: config.nodeId,
+    display_name: config.displayName,
+    state: 'offline',
     online: false,
     gateway_version: GATEWAY_VERSION,
+    protocol_version: 1,
   })
 }

@@ -56,11 +56,22 @@ interface AgentDefaultModel {
 
 export interface GatewayAgentHost {
   start(handlers: AgentHostHandlers): void
+  health(): Promise<AgentHostHealth>
   acquire(options: AcquireAgentOptions): Promise<AgentLease>
   send(sessionId: string, action: AgentAction, input: string): void
   cancel(sessionId: string): void
   release(sessionId: string): Promise<void>
   dispose(): Promise<void>
+}
+
+export interface AgentHostHealth {
+  agent: 'ready' | 'degraded'
+  workspaces: Array<{
+    alias: string
+    status: 'ready' | 'missing' | 'not-directory' | 'unreadable'
+  }>
+  model: 'ready' | 'unavailable'
+  error?: string
 }
 
 export class AgentHostError extends Error {
@@ -97,6 +108,28 @@ export class DshAgentHost implements GatewayAgentHost {
     }) => {
       handlers.onError({ sessionId: String(agent.session.id), turn, step, error })
     }))
+  }
+
+  async health(): Promise<AgentHostHealth> {
+    this.assertStarted()
+    const workspaces = await Promise.all(Object.entries(this.config.workspaces).map(async ([alias, path]) => {
+      try {
+        const metadata = await stat(path)
+        return { alias, status: metadata.isDirectory() ? 'ready' as const : 'not-directory' as const }
+      } catch {
+        return { alias, status: 'unreadable' as const }
+      }
+    }))
+    let model: AgentHostHealth['model'] = 'ready'
+    let error: string | undefined
+    try {
+      this.modelSelection()
+    } catch (reason) {
+      model = 'unavailable'
+      error = reason instanceof Error ? reason.message : String(reason)
+    }
+    const agent = model === 'ready' && workspaces.every(item => item.status === 'ready') ? 'ready' : 'degraded'
+    return { agent, workspaces, model, ...error === undefined ? {} : { error } }
   }
 
   async acquire(options: AcquireAgentOptions): Promise<AgentLease> {

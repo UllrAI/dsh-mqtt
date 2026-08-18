@@ -23,6 +23,8 @@ describe('resolveConfig', () => {
     expect(config.protocolVersion).toBe(5)
     expect(config.clean).toBe(false)
     expect(config.allowExternalSessions).toBe(false)
+    expect(config.displayName).toBe('mac-mini')
+    expect(config.managementPort).toBe(3210)
     expect(config.username).toBe('alice')
     expect(config.password).toBe('secret')
     expect(config.workspaces.app).toBe(resolve('fixtures/app'))
@@ -36,6 +38,7 @@ describe('resolveConfig', () => {
     [{ url: 'mqtt://localhost', namespace: 'a', nodeId: 'b', maxMessageBytes: 10, maxMetadataBytes: 11 }, /maxMetadataBytes/],
     [{ url: 'mqtt://localhost', namespace: 'a', nodeId: 'b', workspaces: {}, defaultWorkspace: 'missing' }, /defaultWorkspace/],
     [{ url: 'mqtt://localhost', namespace: 'a', nodeId: 'b', reconnectPeriodMs: -1 }, /reconnectPeriodMs/],
+    [{ url: 'mqtt://localhost', namespace: 'a', nodeId: 'b', managementPort: 3210, managementHost: '0.0.0.0' }, /managementToken/],
   ])('rejects invalid configuration %#', (input, expected) => {
     expect(() => resolveConfig(input, {})).toThrow(expected)
   })

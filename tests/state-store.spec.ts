@@ -28,6 +28,7 @@ describe('RequestStore', () => {
     expect((await store.reserve('req-1', 'fingerprint-b')).kind).toBe('conflict')
 
     await store.activate('req-1', 'session-1')
+    expect(await store.list()).toHaveLength(1)
     expect(await store.hasSession('session-1')).toBe(true)
     expect(await store.hasSession('other-session')).toBe(false)
     expect((await store.claimControl('req-1', 'cmd-1', 'control-a')).kind).toBe('claimed')
@@ -90,6 +91,21 @@ describe('RequestStore', () => {
     expect((await store.reserve('constructor', 'request-fingerprint')).kind).toBe('reserved')
     expect((await store.claimControl('constructor', 'toString', 'control-fingerprint')).kind).toBe('claimed')
     expect((await store.claimControl('constructor', 'toString', 'control-fingerprint')).kind).toBe('duplicate')
+  })
+
+  it('persists controller invites, authorization, usage, and revocation without exposing token hashes', async () => {
+    const { store, file } = await fixture()
+    const invite = await store.createController('MacBook', ['submit', 'control'], 60_000)
+    expect(invite.token).toHaveLength(43)
+    expect((await store.listControllers())).toMatchObject([{ id: invite.id, status: 'pending', name: 'MacBook' }])
+    expect(await store.authenticateController(invite.id, invite.token, 'submit')).toMatchObject({ ok: false, reason: 'pending' })
+    await store.authorizeController(invite.id)
+    expect(await store.authenticateController(invite.id, invite.token, 'submit')).toMatchObject({ ok: true, controller: { id: invite.id } })
+    expect(await store.authenticateController(invite.id, 'wrong-token', 'submit')).toMatchObject({ ok: false, reason: 'invalid-token' })
+    await store.revokeController(invite.id)
+    expect(await store.authenticateController(invite.id, invite.token, 'control')).toMatchObject({ ok: false, reason: 'revoked' })
+    await store.close()
+    expect(await readFile(file, 'utf8')).not.toContain(invite.token)
   })
 
   it('fails loudly on a corrupt state file', async () => {

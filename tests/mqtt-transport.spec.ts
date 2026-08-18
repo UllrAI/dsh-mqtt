@@ -102,7 +102,13 @@ describe('MqttTransport integration', () => {
     })
     transports.push(transport)
 
-    await expect(transport.start({ onMessage: () => undefined, onConnect: () => undefined })).resolves.toBeUndefined()
+    const states: string[] = []
+    await expect(transport.start({
+      onMessage: () => undefined,
+      onConnect: () => undefined,
+      onState: state => { states.push(state) },
+    })).resolves.toBeUndefined()
+    expect(states).toContain('connecting')
     await expect(transport.stop()).resolves.toBeUndefined()
   })
 
