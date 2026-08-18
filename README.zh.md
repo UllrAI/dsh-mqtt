@@ -7,7 +7,7 @@
 `dsh-mqtt` 可以把一个 DSH 进程变成可通过 MQTT 寻址的 Agent Worker。客户端能够提交任务、观察规范化后的执行事件、对正在运行的回合执行 steer 或 inject、取消任务，并取得有关联 ID 的最终结果。DSH 主机只需主动连接 Broker，因此即使 Worker 位于 NAT 或防火墙之后，也不必对外暴露 HTTP Server。
 
 > [!IMPORTANT]
-> 本项目尚未正式发布，目前适配 DSH `0.1.0-rc.7`。DSH 本身仍处于 developer preview 阶段，后续可能有破坏性变更。本包暂未发布到 npm，请使用下文的本地源码或 GitHub 安装方式。
+> `0.1.0` 是首个 npm 发行版，目前适配 DSH `0.1.0-rc.7`。DSH 本身仍处于 developer preview 阶段，后续可能有破坏性变更。
 
 ## 已实现能力
 
@@ -95,6 +95,12 @@ Mosquitto 2 在未配置 listener 时只绑定本机。不要把匿名开发 Bro
 
 DSH 按 profile 安装插件。第一次使用建议装到 `web` profile，这样仍可使用常规 DSH UI。无人值守部署也可以建立 `mqtt-worker` 等专用 profile。
 
+从 npm 安装：
+
+```sh
+npx @deepseek-ai/dsh plugin --profile web add dsh-mqtt@0.1.0
+```
+
 从本地源码安装：
 
 ```sh
@@ -112,12 +118,6 @@ npx @deepseek-ai/dsh plugin --profile web add github:UllrAI/dsh-mqtt
 Git 依赖会通过包内的 `prepare` 脚本完成构建。pnpm 10 及以上版本可能在第一次安装时拒绝执行，并输出一个 `allowBuilds` key。请把错误信息中给出的准确 key 加到 `~/.dsh/profiles/web/pnpm-workspace.yaml`（或 `$DSH_HOME/profiles/web/pnpm-workspace.yaml`）的 `allowBuilds` 下，然后重新执行安装。使用本地源码目录或已经构建好的 tarball 不需要这一步。
 
 安装站外 bundle 时，pnpm 也可能提示缺少 DSH peer dependency。DSH launcher 会在启动时通过 profile fallback 提供自身匹配版本的核心包；应以 `--dump-config` 和下文的实际启动检查为准。
-
-未来发布 npm 包后，安装命令会是：
-
-```sh
-npx @deepseek-ai/dsh plugin --profile web add dsh-mqtt
-```
 
 ### 配置 profile
 
