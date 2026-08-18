@@ -12,6 +12,7 @@
 ## 已实现能力
 
 - 支持通过 TCP、TLS、WebSocket 或安全 WebSocket 连接 MQTT 3.1.1 / 5 Broker；
+- 支持直接配置或通过环境变量读取 Broker 用户名/密码，并支持自定义 CA 与可选的双向 TLS；
 - 支持持久 MQTT Session、断线重连、retained Presence 与 Last Will；
 - 支持节点级 `submit`、`steer`、`inject` 和 `cancel` 命令；
 - 创建 DSH Agent，并在受控范围内续接已有 Session；
@@ -75,6 +76,20 @@ mosquitto -p 1883 -v
 ```
 
 Mosquitto 2 在未配置 listener 时只绑定本机。不要把匿名开发 Broker 暴露到其他网络。
+
+### 云 MQTT Broker
+
+当 DSH Worker 与调用方位于不同网络时，使用托管 Broker 会更方便。以下服务都提供标准 MQTT 接入端点；此列表仅供选择参考，不代表项目背书：
+
+| 服务 | 说明 |
+| --- | --- |
+| [MQTT.pro](https://mqtt.pro/) | Serverless 托管 MQTT Broker，支持 TLS/SSL、用户名密码认证和 ACL。 |
+| [RunMQTT](https://runmqtt.com/) | 提供隔离的托管 Broker、设备身份、可复用 Topic 策略，以及 MQTT over TLS 和安全 WebSocket 接入。 |
+| [EMQX Cloud](https://www.emqx.com/zh/cloud) | 全托管 MQTT 服务，支持 retained message、shared subscription、规则与数据集成。 |
+| [HiveMQ Cloud](https://www.hivemq.com/products/mqtt-cloud-broker/) | 托管 MQTT 3.1.1/5 服务，支持 TLS、WebSocket、凭据和 Topic 权限。 |
+| [shiftr.io](https://www.shiftr.io/) | 云 MQTT 平台，提供连接/Topic 可视化，以及 HTTP 和 Webhook 集成。 |
+
+把服务商生成的端点、端口、用户名和密码填入下文连接示例即可。生产使用前，请根据服务商最新文档确认协议版本、区域、认证方式、ACL、持久 Session 和配额。列入此表不表示其所有套餐都支持表中全部能力。
 
 ### 安装插件
 
@@ -448,7 +463,27 @@ QoS 1 出站消息在 MQTT.js 接收到 outgoing store 后即返回，不会无�
 
 ### 凭据与 TLS
 
-建议通过环境变量提供凭据：
+网关既支持直接填写 MQTT 用户名/密码，也支持从环境变量读取凭据。无人值守部署应优先使用环境变量，避免把密码保存在 DSH profile 中。
+
+#### 非 TLS 用户名/密码连接
+
+这种配置只适合 loopback、VPN 或其他可信私网。MQTT 用户名/密码认证本身不会加密凭据和 payload。
+
+```yaml
+- id: mqtt-gateway
+  config:
+    url: mqtt://broker.internal.example:1883
+    namespace: ullrai
+    nodeId: mac-mini
+    username: dsh-mac-mini
+    password: replace-with-broker-password
+```
+
+这里直接填写 `password` 只是为了展示完整配置，不要把真实密码提交到 profile。流量只要经过不可信网络，就应使用 `mqtts://` 或 `wss://`。
+
+#### TLS 用户名/密码连接
+
+连接云 Broker 时推荐使用这种配置：
 
 ```yaml
 - id: mqtt-gateway
@@ -458,9 +493,6 @@ QoS 1 出站消息在 MQTT.js 接收到 outgoing store 后即返回，不会无�
     nodeId: mac-mini
     usernameEnv: DSH_MQTT_USERNAME
     passwordEnv: DSH_MQTT_PASSWORD
-    caFile: /etc/dsh-mqtt/ca.pem
-    certFile: /etc/dsh-mqtt/client.pem
-    keyFile: /etc/dsh-mqtt/client-key.pem
     rejectUnauthorized: true
     stateFile: /var/lib/dsh-mqtt/state.json
     workspaces:
@@ -472,6 +504,28 @@ export DSH_MQTT_USERNAME='dsh-mac-mini'
 export DSH_MQTT_PASSWORD='...'
 npx @deepseek-ai/dsh --profile web
 ```
+
+请使用 Broker 提供的准确 hostname 和端口。使用公共 CA 签发证书时通常不需要配置 `caFile`；默认会验证证书和 hostname。安全 WebSocket 端点使用服务商给出的 `wss://` URL 与路径，凭据字段保持相同。
+
+#### 自定义 CA 与双向 TLS
+
+如果 Broker 使用私有 CA，或要求客户端证书，请在 TLS 配置中加入相应文件：
+
+```yaml
+- id: mqtt-gateway
+  config:
+    url: mqtts://broker.internal.example:8883
+    namespace: ullrai
+    nodeId: mac-mini
+    usernameEnv: DSH_MQTT_USERNAME
+    passwordEnv: DSH_MQTT_PASSWORD
+    caFile: /etc/dsh-mqtt/ca.pem
+    certFile: /etc/dsh-mqtt/client.pem
+    keyFile: /etc/dsh-mqtt/client-key.pem
+    rejectUnauthorized: true
+```
+
+`caFile` 用于提供信任的 CA bundle；`certFile` 和 `keyFile` 用于启用双向 TLS，Broker 要求时必须配套设置。Broker 可以在用户名/密码之外额外要求 mTLS，也可以只使用 mTLS。生产环境不要设置 `rejectUnauthorized: false`。
 
 ## Broker ACL
 
