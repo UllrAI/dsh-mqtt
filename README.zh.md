@@ -577,7 +577,7 @@ pnpm pack
 ## 当前限制
 
 - 当前 DSH 兼容性固定在仍快速变化的 `0.1.0-rc.7` API。
-- 插件启动时 Broker 必须可连接；自动重连只在首次成功连接后生效。
+- DSH Host 启动插件时不会等待 Broker。如果 Broker 不可用或 CONNACK 延迟，插件仍会完成加载，MQTT.js 会按 `reconnectPeriodMs` 持续重试；建立连接后才会处理请求并发布 Presence。
 - 已实现的是节点寻址协议；shared subscription Worker Pool 和 workload class Topic 尚未实现。
 - 不支持任意 `reply_to`，响应 Topic 由请求 ID 推导。
 - 尚不支持通过 MQTT 响应远程审批或用户问题。请使用能够处理这些交互的 DSH 界面，或合理配置无人值守 Worker。

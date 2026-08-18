@@ -577,7 +577,7 @@ The public module exports the Cordis plugin plus `MqttAgentGateway`, `RequestSto
 ## Current limitations
 
 - DSH compatibility is pinned to the rapidly changing `0.1.0-rc.7` APIs.
-- The broker must be reachable during plugin startup; automatic reconnect applies after the first successful connection.
+- The DSH Host does not wait for the broker during plugin startup. If the broker is unavailable or the CONNACK is delayed, the plugin remains loaded and MQTT.js keeps retrying according to `reconnectPeriodMs`; requests and presence are handled after a connection is established.
 - The implemented protocol is node-addressed. Shared-subscription worker pools and workload-class topics are not implemented.
 - There is no arbitrary `reply_to`; response topics are derived from the request ID.
 - Remote approval and user-question responses are not implemented. Use a DSH surface that can resolve them, or configure unattended workers appropriately.
