@@ -7,7 +7,7 @@
 `dsh-mqtt` 可以把一个 DSH 进程变成可通过 MQTT 寻址的 Agent Worker。客户端能够提交任务、观察规范化后的执行事件、对正在运行的回合执行 steer 或 inject、取消任务，并取得有关联 ID 的最终结果。DSH 主机只需主动连接 Broker，因此即使 Worker 位于 NAT 或防火墙之后，也不必对外暴露 HTTP Server。
 
 > [!IMPORTANT]
-> `0.1.1` 新增真实 Worker 管理界面与控制端授权，目前适配 DSH `0.1.0-rc.7`。DSH 本身仍处于 developer preview 阶段，后续可能有破坏性变更。
+> `0.1.2` 新增真实 Worker 管理界面与控制端授权，目前适配 DSH `0.1.0-rc.7`。DSH 本身仍处于 developer preview 阶段，后续可能有破坏性变更。
 
 ## 已实现能力
 
@@ -98,7 +98,7 @@ DSH 按 profile 安装插件。第一次使用建议装到 `web` profile，这�
 从 npm 安装：
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web add dsh-mqtt@0.1.1
+npx @deepseek-ai/dsh plugin --profile web add dsh-mqtt@0.1.2
 ```
 
 从本地源码安装：
@@ -431,7 +431,7 @@ dsh/v1/{namespace}/nodes/{nodeId}/status
   "request_capacity": 16,
   "workspaces": [{ "alias": "repo-foo", "status": "ready" }],
   "controller_auth_required": true,
-  "gateway_version": "0.1.1",
+  "gateway_version": "0.1.2",
   "protocol_version": 1,
   "capabilities": ["coding"],
   "health": [
@@ -621,11 +621,11 @@ pnpm pack
 发布由 Git tag 驱动。先更新 `package.json` 和 `CHANGELOG.md`，提交后推送与版本一致的正式 tag：
 
 ```sh
-git tag v0.1.1
-git push origin v0.1.1
+git tag v0.1.2
+git push origin v0.1.2
 ```
 
-`Release` 工作流会校验 tag 是否与 `package.json` 一致，使用锁文件安装依赖，运行完整的 `pnpm check`，发布 npm 包，并创建带自动生成说明的 GitHub Release。请在仓库 Secrets 中配置名为 `NPM_TOKEN` 的 npm granular automation token，并确保它有权发布 `dsh-mqtt`。在单独定义预发布策略前，工作流会拒绝预发布 tag。只有版本号、变更日志和发布内容都准备好后，才应创建 tag。
+`Release` 工作流会校验 tag 是否与 `package.json` 一致，使用锁文件安装依赖，运行完整的 `pnpm check`，发布 npm 包，并创建带自动生成说明的 GitHub Release；若重试时该版本已经存在于 npm，则会跳过重复发布。请在仓库 Secrets 中配置名为 `NPM_TOKEN` 的 npm granular automation token，并确保它有权发布 `dsh-mqtt`。在单独定义预发布策略前，工作流会拒绝预发布 tag。只有版本号、变更日志和发布内容都准备好后，才应创建 tag。
 
 公共模块会导出 Cordis 插件以及 `MqttAgentGateway`、`RequestStore` 和 `TopicLayout`。`dsh-mqtt/protocol` 会导出协议类型、解析器、指纹和信封构造函数。
 
