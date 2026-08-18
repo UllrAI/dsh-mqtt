@@ -98,6 +98,35 @@ describe('resolveConfig', () => {
     })
   })
 
+  it('resolves TLS trust and mutual-authentication files', () => {
+    const config = resolveConfig({
+      url: 'mqtts://broker.example.com:8883',
+      namespace: 'safe',
+      nodeId: 'node',
+      caFile: './fixtures/ca.pem',
+      certFile: './fixtures/client.pem',
+      keyFile: './fixtures/client-key.pem',
+    }, {})
+    expect(config).toMatchObject({
+      caFile: resolve('fixtures/ca.pem'),
+      certFile: resolve('fixtures/client.pem'),
+      keyFile: resolve('fixtures/client-key.pem'),
+      rejectUnauthorized: true,
+    })
+  })
+
+  it.each([
+    [{ url: 'mqtts://localhost', certFile: './client.pem' }, /certFile and keyFile/],
+    [{ url: 'mqtts://localhost', keyFile: './client-key.pem' }, /certFile and keyFile/],
+    [{ url: 'mqtt://localhost', caFile: './ca.pem' }, /require an mqtts or wss URL/],
+  ])('rejects incomplete or ineffective TLS configuration %#', (overrides, expected) => {
+    expect(() => resolveConfig({
+      namespace: 'safe',
+      nodeId: 'node',
+      ...overrides,
+    }, {})).toThrow(expected)
+  })
+
   it('handles prototype property names as ordinary workspace aliases', () => {
     const config = resolveConfig({
       url: 'mqtt://localhost',

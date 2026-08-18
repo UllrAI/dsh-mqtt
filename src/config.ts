@@ -175,6 +175,15 @@ export function resolveConfig(config: Config, env: NodeJS.ProcessEnv = process.e
   if (!['mqtt:', 'mqtts:', 'ws:', 'wss:'].includes(parsedUrl.protocol)) {
     throw new Error(`dsh-mqtt: url protocol must be mqtt, mqtts, ws, or wss`)
   }
+  const caFile = config.caFile === undefined ? undefined : resolve(config.caFile)
+  const certFile = config.certFile === undefined ? undefined : resolve(config.certFile)
+  const keyFile = config.keyFile === undefined ? undefined : resolve(config.keyFile)
+  if ((certFile === undefined) !== (keyFile === undefined)) {
+    throw new Error('dsh-mqtt: certFile and keyFile must be configured together')
+  }
+  if ((caFile !== undefined || certFile !== undefined) && !['mqtts:', 'wss:'].includes(parsedUrl.protocol)) {
+    throw new Error('dsh-mqtt: TLS certificate files require an mqtts or wss URL')
+  }
 
   const namespace = topicSegment(config.namespace, 'namespace')
   const nodeId = topicSegment(config.nodeId, 'nodeId')
@@ -228,9 +237,9 @@ export function resolveConfig(config: Config, env: NodeJS.ProcessEnv = process.e
     sessionExpirySeconds,
     ...username === undefined ? {} : { username },
     ...password === undefined ? {} : { password },
-    ...config.caFile === undefined ? {} : { caFile: resolve(config.caFile) },
-    ...config.certFile === undefined ? {} : { certFile: resolve(config.certFile) },
-    ...config.keyFile === undefined ? {} : { keyFile: resolve(config.keyFile) },
+    ...caFile === undefined ? {} : { caFile },
+    ...certFile === undefined ? {} : { certFile },
+    ...keyFile === undefined ? {} : { keyFile },
     rejectUnauthorized: config.rejectUnauthorized ?? true,
     stateFile: resolve(config.stateFile ?? '.dsh-mqtt/state.json'),
     workspaces,

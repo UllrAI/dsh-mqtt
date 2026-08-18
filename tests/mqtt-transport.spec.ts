@@ -1,6 +1,7 @@
 import { createServer, type Server } from 'node:net'
 import { createBroker } from 'aedes'
 import type Aedes from 'aedes'
+import type { AedesOptions } from 'aedes'
 import { connectAsync, type MqttClient } from 'mqtt'
 import { afterEach, describe, expect, it } from 'vitest'
 import { resolveConfig } from '../src/config.ts'
@@ -27,8 +28,8 @@ function logger(): Logger {
   }
 }
 
-async function brokerFixture(): Promise<BrokerFixture> {
-  const broker = createBroker()
+async function brokerFixture(options?: AedesOptions): Promise<BrokerFixture> {
+  const broker = createBroker(options)
   const server = createServer(broker.handle)
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)
@@ -81,6 +82,40 @@ afterEach(async () => {
 })
 
 describe('MqttTransport integration', () => {
+  it('authenticates to a broker with MQTT username and password', async () => {
+    let authenticatedClient: string | undefined
+    const fixture = await brokerFixture({
+      authenticate: (client, username, password, done) => {
+        const accepted = username === 'gateway-user' && password?.toString() === 'gateway-password'
+        if (accepted) authenticatedClient = client.id
+        done(null, accepted)
+      },
+    })
+    const config = resolveConfig({
+      url: fixture.url,
+      namespace: 'integration',
+      nodeId: 'authenticated-worker',
+      clientId: 'dsh-mqtt-authenticated-worker',
+      protocolVersion: 4,
+      clean: true,
+      reconnectPeriodMs: 0,
+      username: 'gateway-user',
+      password: 'gateway-password',
+    })
+    const topics = new TopicLayout(config.namespace, config.nodeId)
+    const transport = new MqttTransport({
+      config,
+      topics,
+      offlineStatus: JSON.stringify({ type: 'node.status', online: false }),
+      logger: logger(),
+    })
+    transports.push(transport)
+
+    await transport.start({ onMessage: () => undefined, onConnect: () => undefined })
+
+    expect(authenticatedClient).toBe('dsh-mqtt-authenticated-worker')
+  })
+
   it('subscribes to commands and publishes correlated output through a real broker', async () => {
     const fixture = await brokerFixture()
     const config = resolveConfig({
