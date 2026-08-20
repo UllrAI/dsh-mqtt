@@ -4,6 +4,31 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## 0.1.3 - 2026-08-21
+
+### Added
+
+- The Worker UI now registers as a **MQTT Worker** section inside DSH settings, built on `ctx.slots` and the shipped UI primitives, so it follows the shell's language and theme and no longer requires a second browser tab.
+- Server-Sent Events on `GET /api/stream` push status, event, and result changes as they happen. Clients fall back to polling when the stream cannot be held open.
+- A task history view listing recent requests with status and failure reason, backed by the existing `GET /api/requests` endpoint.
+- Descriptions and form groups for every configuration field, so the DSH plugin configuration page renders labelled, grouped controls instead of bare field names.
+- A `CI` workflow running `pnpm check` on pull requests and pushes.
+
+### Changed
+
+- The standalone management page was rebuilt on the same core and components as the DSH panel, replacing the handed-over React scaffold.
+- Cross-origin requests from loopback origins are accepted by default, which is what the DSH panel needs. `managementCorsOrigin` still names a single exact origin when one is required.
+- `gateway_version` is read from `package.json` instead of a hand-maintained constant.
+- Targets DeepSeek Harness `0.1.0-rc.8`.
+
+### Fixed
+
+- Every pending controller can be approved or rejected, not only the first one in the list.
+- A failing endpoint no longer blanks the whole panel; each section reports its own error and the rest keeps rendering.
+- An unauthorized response stops the refresh loop and asks for a token instead of retrying indefinitely.
+- Clipboard failures are reported instead of silently doing nothing, and an invitation whose broker details could not be read is withheld rather than copied half-written.
+- Toast timers are cleared on unmount, and dialogs trap focus, close on Escape, and restore focus on close.
+
 ## 0.1.2 - 2026-08-18
 
 ### Fixed

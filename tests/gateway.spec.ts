@@ -11,7 +11,7 @@ import type {
   GatewayAgentHost,
 } from '../src/agent-host.ts'
 import { resolveConfig, type Config as PluginConfig } from '../src/config.ts'
-import { MqttAgentGateway } from '../src/gateway.ts'
+import { MqttAgentGateway, type GatewayNotice } from '../src/gateway.ts'
 import type { GatewayResult } from '../src/protocol.ts'
 import { RequestStore } from '../src/state-store.ts'
 import type {
@@ -194,6 +194,21 @@ function lastResult(fixture: Awaited<ReturnType<typeof setup>>, id: string): Gat
   return fixture.transport.publications
     .filter(item => item.topic === fixture.gateway.topics.result(id))
     .at(-1)?.value as unknown as GatewayResult | undefined
+}
+
+/** Drive one request from submit through agent output to a completed result. */
+async function runRequest(fixture: Awaited<ReturnType<typeof setup>>, id: string): Promise<void> {
+  await inbound(fixture, fixture.gateway.topics.requests, submit(id))
+  const sessionId = `session-${id}`
+  fixture.host.status(sessionId, 'running')
+  fixture.host.event(sessionId, {
+    seq: 4,
+    type: 'assistant/message',
+    data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: 'Done.' }] } },
+  })
+  fixture.host.event(sessionId, { seq: 5, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+  fixture.host.status(sessionId, 'idle')
+  await fixture.gateway.whenIdle()
 }
 
 afterEach(async () => {
@@ -542,5 +557,45 @@ describe('MqttAgentGateway', () => {
     await inbound(fixture, fixture.gateway.topics.requests, '{')
     expect(fixture.transport.publications).toHaveLength(before)
     expect(fixture.logger.warnings).toHaveLength(1)
+  })
+
+  it('pushes status, event, and result notices to management subscribers', async () => {
+    const fixture = await setup()
+    const notices: GatewayNotice[] = []
+    const unsubscribe = fixture.gateway.subscribe(notice => notices.push(notice))
+
+    await runRequest(fixture, 'watched')
+    expect(notices.filter(notice => notice.kind === 'event').length).toBeGreaterThan(0)
+    expect(notices.filter(notice => notice.kind === 'result')).toHaveLength(1)
+
+    // The retained offline presence publish on stop is a status notice too.
+    await fixture.gateway.stop()
+    expect(notices.filter(notice => notice.kind === 'status').length).toBeGreaterThan(0)
+
+    const delivered = notices.length
+    unsubscribe()
+    await fixture.gateway.stop()
+    expect(notices).toHaveLength(delivered)
+  })
+
+  it('drops a subscriber that throws instead of breaking the publish path', async () => {
+    const fixture = await setup()
+    let calls = 0
+    fixture.gateway.subscribe(() => {
+      calls += 1
+      throw new Error('listener exploded')
+    })
+    const healthy: GatewayNotice[] = []
+    fixture.gateway.subscribe(notice => healthy.push(notice))
+
+    await runRequest(fixture, 'resilient')
+
+    // Dropped after its first throw, while the publish path carried on.
+    expect(calls).toBe(1)
+    expect(healthy.length).toBeGreaterThan(1)
+    expect(lastResult(fixture, 'resilient')).toMatchObject({ status: 'completed' })
+    expect(fixture.logger.warnings.flat()).toContainEqual(
+      expect.stringContaining('dropped a management subscriber'),
+    )
   })
 })

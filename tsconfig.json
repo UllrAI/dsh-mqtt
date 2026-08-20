@@ -20,5 +20,7 @@
     "sourceMap": true,
     "skipLibCheck": true
   },
-  "include": ["src", "tests", "vitest.config.ts", "tsdown.config.ts"]
+  "include": ["src", "tests", "vitest.config.ts", "tsdown.config.ts"],
+  // The client tree and its tests need DOM and JSX; `tsconfig.client.json` owns them.
+  "exclude": ["src/client", "tests/client-*"]
 }
