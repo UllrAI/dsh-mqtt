@@ -14,7 +14,7 @@ describe('release workflow', () => {
     expect(workflow).toContain("if: steps.npm.outputs.published != 'true'")
     expect(workflow).toContain('pnpm publish --no-git-checks')
     expect(workflow).toContain('NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}')
-    expect(workflow).toContain('softprops/action-gh-release@v2')
+    expect(workflow).toContain('softprops/action-gh-release@v3')
   })
 
   it('does not enable prerelease publishing implicitly', () => {
