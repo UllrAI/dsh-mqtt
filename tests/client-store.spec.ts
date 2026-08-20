@@ -158,6 +158,7 @@ describe('ManagementStore', () => {
   })
 
   it('opens the stream and refreshes on every notice kind', async () => {
+    vi.useFakeTimers()
     const client = stubClient()
     const store = createStore(client)
     store.start()
@@ -170,11 +171,53 @@ describe('ManagementStore', () => {
     expect(store.getState().live).toBe(true)
 
     source?.emit('status')
+    await vi.advanceTimersByTimeAsync(500)
+    await settle()
+    expect(client.status).toHaveBeenCalledTimes(2)
+
     source?.emit('result')
+    await vi.advanceTimersByTimeAsync(500)
+    await settle()
+    expect(client.status).toHaveBeenCalledTimes(3)
+
     source?.emit('event')
+    await vi.advanceTimersByTimeAsync(500)
+    await settle()
+    expect(client.status).toHaveBeenCalledTimes(4)
+  })
+
+  it('collapses a burst of notices into one reload', async () => {
+    vi.useFakeTimers()
+    const client = stubClient()
+    const store = createStore(client)
+    store.start()
+    await settle()
+    const source = FakeEventSource.instances[0]
+
+    // A running turn emits one event per output chunk; four requests each
+    // would be a self-inflicted flood.
+    for (let index = 0; index < 50; index += 1) source?.emit('event')
+    await settle()
+    expect(client.status).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(500)
+    await settle()
+    expect(client.status).toHaveBeenCalledTimes(2)
+  })
+
+  it('drops a pending coalesced reload on stop', async () => {
+    vi.useFakeTimers()
+    const client = stubClient()
+    const store = createStore(client)
+    store.start()
     await settle()
 
-    expect(client.status).toHaveBeenCalledTimes(4)
+    FakeEventSource.instances[0]?.emit('event')
+    store.stop()
+    await vi.advanceTimersByTimeAsync(500)
+    await settle()
+
+    expect(client.status).toHaveBeenCalledTimes(1)
   })
 
   it('falls back to polling when the stream errors', async () => {

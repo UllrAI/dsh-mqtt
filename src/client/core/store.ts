@@ -42,6 +42,13 @@ export const INITIAL_STATE: ManagementState = {
 }
 
 const POLL_INTERVAL_MS = 15_000
+/**
+ * Shortest gap between stream-driven reloads.
+ *
+ * A running turn emits an event per output chunk, and each reload costs four
+ * requests, so notices are coalesced. Short enough to still read as live.
+ */
+const COALESCE_MS = 400
 
 export type StateListener = (state: ManagementState) => void
 
@@ -50,6 +57,7 @@ export class ManagementStore {
   private readonly listeners = new Set<StateListener>()
   private source: EventSource | undefined
   private timer: ReturnType<typeof setInterval> | undefined
+  private coalesceTimer: ReturnType<typeof setTimeout> | undefined
   private started = false
   private disposed = false
 
@@ -83,6 +91,8 @@ export class ManagementStore {
     this.closeStream()
     if (this.timer !== undefined) clearInterval(this.timer)
     this.timer = undefined
+    if (this.coalesceTimer !== undefined) clearTimeout(this.coalesceTimer)
+    this.coalesceTimer = undefined
     this.listeners.clear()
   }
 
@@ -148,7 +158,7 @@ export class ManagementStore {
     this.source = source
     source.onopen = () => this.patch({ live: true })
     // Any notice means gateway state moved; re-read rather than mirror the diff.
-    const onNotice = (): void => void this.refresh()
+    const onNotice = (): void => this.scheduleRefresh()
     source.addEventListener('status', onNotice)
     source.addEventListener('result', onNotice)
     source.addEventListener('event', onNotice)
@@ -156,6 +166,15 @@ export class ManagementStore {
       // The browser reconnects on its own; polling covers the gap meanwhile.
       this.patch({ live: false })
     }
+  }
+
+  /** Collapse a burst of notices into one reload. */
+  private scheduleRefresh(): void {
+    if (this.disposed || this.coalesceTimer !== undefined) return
+    this.coalesceTimer = setTimeout(() => {
+      this.coalesceTimer = undefined
+      void this.refresh()
+    }, COALESCE_MS)
   }
 
   private closeStream(): void {
