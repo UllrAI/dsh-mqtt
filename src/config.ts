@@ -90,48 +90,112 @@ export interface ResolvedConfig {
   requireControllerAuth: boolean
 }
 
-export const Config: Schema<Config> = Schema.object({
-  url: Schema.string().default('mqtt://127.0.0.1:1883'),
-  namespace: Schema.string().default('local'),
-  nodeId: Schema.string().default('dsh-node'),
-  displayName: Schema.string(),
-  clientId: Schema.string(),
-  protocolVersion: Schema.union([Schema.const(4), Schema.const(5)]).default(5),
-  clean: Schema.boolean().default(false),
-  keepaliveSeconds: Schema.number().default(30),
-  connectTimeoutMs: Schema.number().default(10_000),
-  reconnectPeriodMs: Schema.number().default(1_000),
-  sessionExpirySeconds: Schema.number().default(86_400),
-  username: Schema.string(),
-  password: Schema.string().role('secret'),
-  usernameEnv: Schema.string(),
-  passwordEnv: Schema.string(),
-  caFile: Schema.string(),
-  certFile: Schema.string(),
-  keyFile: Schema.string(),
-  rejectUnauthorized: Schema.boolean().default(true),
-  stateFile: Schema.string().default('.dsh-mqtt/state.json'),
-  workspaces: Schema.dict(Schema.string()).default({}),
-  defaultWorkspace: Schema.string(),
-  allowExternalSessions: Schema.boolean().default(false),
-  provider: Schema.string(),
-  model: Schema.string(),
-  maxTokens: Schema.number(),
-  capabilities: Schema.array(Schema.string()).default([]),
-  eventExposure: Schema.union(['safe', 'full']).default('safe'),
-  maxMessageBytes: Schema.number().default(65_536),
-  maxMetadataBytes: Schema.number().default(8_192),
-  maxInputChars: Schema.number().default(32_768),
-  maxActiveRequests: Schema.number().default(16),
-  dedupTtlSeconds: Schema.number().default(604_800),
-  heartbeatSeconds: Schema.number().default(15),
-  managementPort: Schema.number().default(3210),
-  managementHost: Schema.string().default('127.0.0.1'),
-  managementCorsOrigin: Schema.string(),
-  managementToken: Schema.string().role('secret'),
-  managementTokenEnv: Schema.string(),
-  requireControllerAuth: Schema.boolean().default(false),
-})
+/**
+ * Plugin configuration schema.
+ *
+ * Grouped with `Schema.intersect` rather than nested objects: the DSH settings
+ * form renders one titled section per member while the resolved value stays
+ * flat, so grouping costs no migration.
+ */
+export const Config: Schema<Config> = Schema.intersect([
+  Schema.object({
+    url: Schema.string().default('mqtt://127.0.0.1:1883')
+      .description('Broker URL. Accepts mqtt, mqtts, ws, or wss.'),
+    protocolVersion: Schema.union([Schema.const(4), Schema.const(5)]).default(5)
+      .description('MQTT protocol level: 5, or 4 for MQTT 3.1.1 brokers.'),
+    clientId: Schema.string()
+      .description('Client identifier sent on connect. Defaults to dsh-mqtt-<namespace>-<nodeId>.'),
+    clean: Schema.boolean().default(false)
+      .description('Start a clean session, discarding any state the broker held for this client id.'),
+    keepaliveSeconds: Schema.number().default(30)
+      .description('Interval between keepalive pings.'),
+    connectTimeoutMs: Schema.number().default(10_000)
+      .description('How long to wait for CONNACK before giving up on an attempt.'),
+    reconnectPeriodMs: Schema.number().default(1_000)
+      .description('Delay between reconnect attempts. Set to 0 to disable reconnecting.'),
+    sessionExpirySeconds: Schema.number().default(86_400)
+      .description('How long the broker keeps this session after a disconnect (MQTT 5 only).'),
+    username: Schema.string()
+      .description('Broker username. Use usernameEnv instead to read it from the environment.'),
+    password: Schema.string().role('secret')
+      .description('Broker password. Use passwordEnv instead to read it from the environment.'),
+    usernameEnv: Schema.string()
+      .description('Environment variable holding the broker username.'),
+    passwordEnv: Schema.string()
+      .description('Environment variable holding the broker password.'),
+  }).description('Broker connection'),
+
+  Schema.object({
+    caFile: Schema.string()
+      .description('Path to a CA certificate for brokers using a private authority. Requires an mqtts or wss URL.'),
+    certFile: Schema.string()
+      .description('Client certificate for mutual TLS. Must be set together with keyFile.'),
+    keyFile: Schema.string()
+      .description('Private key for the client certificate. Must be set together with certFile.'),
+    rejectUnauthorized: Schema.boolean().default(true)
+      .description('Verify the broker certificate. Turning this off exposes the connection to interception.'),
+  }).description('TLS'),
+
+  Schema.object({
+    namespace: Schema.string().default('local')
+      .description('Topic namespace shared by every node in one deployment.'),
+    nodeId: Schema.string().default('dsh-node')
+      .description('Identifier for this node within the namespace. Must be unique.'),
+    displayName: Schema.string()
+      .description('Human-readable name shown to controllers. Defaults to the node id.'),
+    capabilities: Schema.array(Schema.string()).default([])
+      .description('Tags controllers can match on when choosing a node, such as gpu or macos.'),
+  }).description('Node identity'),
+
+  Schema.object({
+    workspaces: Schema.dict(Schema.string()).default({})
+      .description('Named directories requests may run in, as alias to path. Relative paths resolve against the DSH working directory.'),
+    defaultWorkspace: Schema.string()
+      .description('Workspace used when a request does not name one. Must be a configured alias.'),
+    allowExternalSessions: Schema.boolean().default(false)
+      .description('Allow requests to attach to sessions this gateway did not create.'),
+    provider: Schema.string()
+      .description('Model provider override. Must be set together with model; otherwise the DSH default applies.'),
+    model: Schema.string()
+      .description('Model override. Must be set together with provider.'),
+    maxTokens: Schema.number()
+      .description('Cap on output tokens per turn. Leave unset to use the model default.'),
+    eventExposure: Schema.union(['safe', 'full']).default('safe')
+      .description('How much of each session event to forward. "safe" omits payloads that may contain file contents or command output.'),
+    stateFile: Schema.string().default('.dsh-mqtt/state.json')
+      .description('Where request and controller state is persisted across restarts.'),
+  }).description('Agents and workspaces'),
+
+  Schema.object({
+    maxMessageBytes: Schema.number().default(65_536)
+      .description('Largest accepted inbound message. Anything bigger is rejected unread.'),
+    maxMetadataBytes: Schema.number().default(8_192)
+      .description('Cap on the metadata object carried by a request. Must not exceed maxMessageBytes.'),
+    maxInputChars: Schema.number().default(32_768)
+      .description('Cap on the prompt text of a single request or control command.'),
+    maxActiveRequests: Schema.number().default(16)
+      .description('How many requests may run at once. Further requests are rejected as retryable.'),
+    dedupTtlSeconds: Schema.number().default(604_800)
+      .description('How long completed request ids are remembered, so a redelivery returns the original result instead of running twice.'),
+    heartbeatSeconds: Schema.number().default(15)
+      .description('Interval between retained node status publishes. Controllers treat a node as stale after two missed beats.'),
+  }).description('Limits'),
+
+  Schema.object({
+    managementPort: Schema.number().default(3210)
+      .description('Port for the management API and standalone UI. Set to 0 to disable both; the DSH settings panel uses this API too.'),
+    managementHost: Schema.string().default('127.0.0.1')
+      .description('Address the management server binds to. Anything other than loopback requires managementToken.'),
+    managementCorsOrigin: Schema.string()
+      .description('Exact origin allowed to call the management API. Leave unset to allow local origins only, which is what the DSH settings panel needs.'),
+    managementToken: Schema.string().role('secret')
+      .description('Bearer token required by the management API. Use managementTokenEnv instead to read it from the environment.'),
+    managementTokenEnv: Schema.string()
+      .description('Environment variable holding the management token.'),
+    requireControllerAuth: Schema.boolean().default(false)
+      .description('Require controllers to be invited and approved before they may submit or steer.'),
+  }).description('Management interface'),
+]) as Schema<Config>
 
 const TOPIC_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const WORKSPACE_ALIAS = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/

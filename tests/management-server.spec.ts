@@ -126,4 +126,98 @@ describe('ManagementServer', () => {
     expect(response.status).toBe(200)
     expect(response.headers.get('access-control-allow-origin')).toBe('https://control.example.com')
   })
+
+  it('reflects loopback origins so the DSH settings panel reaches the API unconfigured', async () => {
+    const port = await freePort()
+    const config = resolveConfig({
+      url: 'mqtt://127.0.0.1:1883',
+      namespace: 'test',
+      nodeId: 'worker',
+      managementPort: port,
+    })
+    const gateway = { getStatus: vi.fn().mockResolvedValue({ state: 'ready' }) } as unknown as MqttAgentGateway
+    const server = new ManagementServer({ gateway, config, logger: logger() })
+    servers.push(server)
+    await server.start()
+    const url = `http://127.0.0.1:${port}/api/status`
+
+    for (const origin of ['http://localhost:5173', 'http://127.0.0.1:8080']) {
+      const response = await fetch(url, { headers: { origin } })
+      expect(response.headers.get('access-control-allow-origin')).toBe(origin)
+      // Caches must not serve one origin's response to another.
+      expect(response.headers.get('vary')).toBe('origin')
+    }
+
+    for (const origin of ['https://evil.example.com', 'null']) {
+      const response = await fetch(url, { headers: { origin } })
+      expect(response.status).toBe(200)
+      expect(response.headers.get('access-control-allow-origin')).toBeNull()
+    }
+
+    const preflight = await fetch(url, { method: 'OPTIONS', headers: { origin: 'http://localhost:5173' } })
+    expect(preflight.status).toBe(204)
+    expect(preflight.headers.get('access-control-allow-methods')).toContain('DELETE')
+    expect(preflight.headers.get('access-control-allow-headers')).toContain('authorization')
+  })
+
+  it('pushes gateway notices over SSE and stops cleanly with the stream still open', async () => {
+    const port = await freePort()
+    const config = resolveConfig({
+      url: 'mqtt://127.0.0.1:1883',
+      namespace: 'test',
+      nodeId: 'worker',
+      managementPort: port,
+    })
+    let publish: ((notice: unknown) => void) | undefined
+    const unsubscribe = vi.fn()
+    const gateway = {
+      subscribe: vi.fn((listener: (notice: unknown) => void) => {
+        publish = listener
+        return unsubscribe
+      }),
+    } as unknown as MqttAgentGateway
+    const server = new ManagementServer({ gateway, config, logger: logger() })
+    servers.push(server)
+    await server.start()
+
+    const response = await fetch(`http://127.0.0.1:${port}/api/stream`, {
+      headers: { origin: 'http://localhost:5173' },
+    })
+    expect(response.headers.get('content-type')).toContain('text/event-stream')
+    expect(response.headers.get('access-control-allow-origin')).toBe('http://localhost:5173')
+    // Proxy buffering would defer every frame until the stream closed.
+    expect(response.headers.get('x-accel-buffering')).toBe('no')
+
+    const reader = (response.body as ReadableStream<Uint8Array>).getReader()
+    const decoder = new TextDecoder()
+    expect(decoder.decode((await reader.read()).value)).toBe(': connected\n\n')
+
+    publish?.({ kind: 'status', status: { state: 'ready' } })
+    expect(decoder.decode((await reader.read()).value))
+      .toBe('event: status\ndata: {"kind":"status","status":{"state":"ready"}}\n\n')
+
+    // `server.close()` waits on open connections, so `stop()` must end this one.
+    await server.stop()
+    servers.length = 0
+    expect(unsubscribe).toHaveBeenCalledOnce()
+    expect((await reader.read()).done).toBe(true)
+  })
+
+  it('rejects an unauthenticated stream request', async () => {
+    const port = await freePort()
+    const config = resolveConfig({
+      url: 'mqtt://127.0.0.1:1883',
+      namespace: 'test',
+      nodeId: 'worker',
+      managementPort: port,
+      managementToken: 'management-secret',
+    })
+    const gateway = { subscribe: vi.fn() } as unknown as MqttAgentGateway
+    const server = new ManagementServer({ gateway, config, logger: logger() })
+    servers.push(server)
+    await server.start()
+
+    expect((await fetch(`http://127.0.0.1:${port}/api/stream`)).status).toBe(401)
+    expect(gateway.subscribe).not.toHaveBeenCalled()
+  })
 })

@@ -11,14 +11,15 @@ import {
   ProtocolError,
   type ControlRequest,
   type GatewayError,
+  type GatewayEvent,
   type GatewayResult,
   type SubmitRequest,
 } from './protocol.ts'
 import { RequestStore, type ControllerInvite, type ControllerSummary, type StoredRequest } from './state-store.ts'
 import { TopicLayout } from './topics.ts'
 import type { GatewayTransport, IncomingMessage, Logger, TransportState } from './transport.ts'
+import { GATEWAY_VERSION } from './version.ts'
 
-const GATEWAY_VERSION = '0.1.2'
 const SUMMARY_LIMIT = 8_000
 
 export type NodeState = 'starting' | 'connecting' | 'ready' | 'busy' | 'degraded' | 'offline' | 'stopped'
@@ -58,6 +59,19 @@ interface ActiveRequest {
   cancelRequested: boolean
 }
 
+/**
+ * Live gateway change pushed to management UI subscribers.
+ *
+ * Mirrors what already goes out over MQTT, so the UI observes the same
+ * transitions controllers do instead of re-polling for them.
+ */
+export type GatewayNotice =
+  | { kind: 'event'; event: GatewayEvent }
+  | { kind: 'result'; result: GatewayResult }
+  | { kind: 'status'; status: NodeStatus }
+
+export type GatewayNoticeListener = (notice: GatewayNotice) => void
+
 function json(value: unknown): string {
   return JSON.stringify(value)
 }
@@ -85,6 +99,7 @@ export class MqttAgentGateway {
   private connectionState: TransportState = 'offline'
   private nodeState: NodeState = 'starting'
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined
+  private readonly noticeListeners = new Set<GatewayNoticeListener>()
 
   constructor(
     private readonly config: ResolvedConfig,
@@ -170,6 +185,28 @@ export class MqttAgentGateway {
 
   async whenIdle(): Promise<void> {
     await this.operationQueue
+  }
+
+  /**
+   * Observe gateway changes as they happen. Returns an unsubscribe function.
+   *
+   * A listener that throws is dropped rather than allowed to break the publish
+   * path: management UI delivery must never take the gateway down.
+   */
+  subscribe(listener: GatewayNoticeListener): () => void {
+    this.noticeListeners.add(listener)
+    return () => this.noticeListeners.delete(listener)
+  }
+
+  private notify(notice: GatewayNotice): void {
+    for (const listener of this.noticeListeners) {
+      try {
+        listener(notice)
+      } catch (error) {
+        this.noticeListeners.delete(listener)
+        this.logger.warn('dsh-mqtt: dropped a management subscriber that threw', error)
+      }
+    }
   }
 
   async getStatus(): Promise<NodeStatus> {
@@ -504,16 +541,20 @@ export class MqttAgentGateway {
   }
 
   private async publishEvent(id: string, type: string, data?: unknown, sequence?: number): Promise<void> {
-    await this.transport.publish(this.topics.events(id), json(protocolEvent(id, type, data, sequence)), { qos: 1 })
+    const event = protocolEvent(id, type, data, sequence)
+    this.notify({ kind: 'event', event })
+    await this.transport.publish(this.topics.events(id), json(event), { qos: 1 })
   }
 
   private async publishResult(result: GatewayResult): Promise<void> {
+    this.notify({ kind: 'result', result })
     await this.transport.publish(this.topics.result(result.id), json(result), { qos: 1 })
   }
 
   private async publishOnlineStatus(): Promise<void> {
     if (this.connectionState !== 'connected' && this.connectionState !== 'degraded') return
     const status = await this.buildStatus()
+    this.notify({ kind: 'status', status })
     await this.transport.publish(this.topics.status, json(status), { qos: 1, retain: true })
   }
 
@@ -521,6 +562,7 @@ export class MqttAgentGateway {
     this.nodeState = 'offline'
     if (this.connectionState !== 'connected' && !this.stopping) return
     const status = await this.buildStatus()
+    this.notify({ kind: 'status', status })
     await this.transport.publish(this.topics.status, json(status), { qos: 1, retain: true })
   }
 

@@ -7,7 +7,7 @@ MQTT protocol driver and agent worker gateway for [DeepSeek Harness (DSH)](https
 `dsh-mqtt` turns a DSH process into an MQTT-addressable agent worker. A client can submit work, observe normalized execution events, steer or inject context into a running turn, cancel it, and receive a correlated final result. The DSH host only makes an outbound broker connection, so the worker can stay behind NAT or a firewall without exposing an HTTP server.
 
 > [!IMPORTANT]
-> Version `0.1.2` adds the live Worker management UI and controller authorization, and currently targets DSH `0.1.0-rc.7`. DSH itself is a developer preview and may introduce breaking changes.
+> Version `0.1.3` moves the Worker UI into the DSH settings panel and pushes updates over SSE. It currently targets DSH `0.1.0-rc.8`. DSH itself is a developer preview and may introduce breaking changes.
 
 ## What it provides
 
@@ -58,7 +58,7 @@ The implementation uses DSH's public Agent and event surfaces:
 - `agent.followup()`, `agent.steer()`, `agent.inject()`, and `agent.cancel()`;
 - `session/event`, `agent/status`, and `agent/error`.
 
-It does not depend on DSH Web UI internals.
+The management UI is built on the one extension point DSH offers third-party client code, `ctx.slots`. It registers a `settings.section` entry alongside the shipped ones and never replaces them. Because DSH gives plugin UI no data channel of its own, the panel reads the plugin's own management API over HTTP.
 
 ## Quick start
 
@@ -98,7 +98,7 @@ DSH installs plugins into a profile. The `web` profile is convenient for a first
 From npm:
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web add dsh-mqtt@0.1.2
+npx @deepseek-ai/dsh plugin --profile web add dsh-mqtt@0.1.3
 ```
 
 From a local checkout:
@@ -131,7 +131,8 @@ Edit `~/.dsh/profiles/web/cordis.patch.yml`, or the equivalent path below `$DSH_
     nodeId: mac-mini
     displayName: Mac mini · development
 
-    # The Worker management UI listens on loopback by default.
+    # The management API and standalone page listen on loopback by default.
+    # The DSH settings panel reads this API too, so leave the port on.
     managementHost: 127.0.0.1
     managementPort: 3210
     requireControllerAuth: true
@@ -161,17 +162,21 @@ export DEEPSEEK_API_KEY='...'
 npx @deepseek-ai/dsh --profile web
 ```
 
-### Open the Worker management UI
+### Open the Worker UI
 
-After the plugin starts, open this URL on the Worker machine:
+The Worker UI comes in two forms. Both render the same panel against the same API, so use whichever fits the deployment.
+
+**In DSH.** Open DSH settings and select **MQTT Worker**. This is the usual way in: no second tab, and the panel follows the shell's language and theme. It reads the management API on `managementPort`, which loopback origins may call without extra configuration. If the plugin's management server runs somewhere other than `http://127.0.0.1:3210`, set `DSH_MQTT_MANAGEMENT_URL` on the shell window to its `/api` root.
+
+**Standalone.** For headless or remote Workers with no DSH web shell in front of the operator, the plugin also serves a page of its own on the Worker machine:
 
 ```text
 http://127.0.0.1:3210/
 ```
 
-Broker, Agent, model, workspace, and capacity data come from live Gateway checks. The UI creates controller invitations, approves access, reports last use, and revokes controllers. Set `managementPort: 0` to disable it.
+Broker, Agent, model, workspace, and capacity data come from live Gateway checks. Both forms create controller invitations, approve access, list recent tasks, report last use, and revoke controllers. Updates arrive over Server-Sent Events and fall back to polling when the stream cannot be held open. Set `managementPort: 0` to turn off the API and the standalone page — which also leaves the DSH panel with nothing to read.
 
-The management server binds to loopback by default. A non-loopback `managementHost` requires `managementToken` or `managementTokenEnv`; the UI asks for that token and keeps it only for the current browser session, while API clients send `Authorization: Bearer <token>`. Cross-origin API access is disabled unless `managementCorsOrigin` is set explicitly. Never expose an unauthenticated management endpoint to a network.
+The management server binds to loopback by default. A non-loopback `managementHost` requires `managementToken` or `managementTokenEnv`; the UI asks for that token and keeps it in `sessionStorage` for the current tab only, while API clients send `Authorization: Bearer <token>`. Cross-origin requests are accepted from loopback origins, which is what the DSH panel needs; set `managementCorsOrigin` to name a single exact origin instead. Never expose an unauthenticated management endpoint to a network.
 
 ### Add a controller
 
@@ -431,7 +436,7 @@ The gateway publishes retained online status after each successful connection:
   "request_capacity": 16,
   "workspaces": [{ "alias": "repo-foo", "status": "ready" }],
   "controller_auth_required": true,
-  "gateway_version": "0.1.2",
+  "gateway_version": "0.1.3",
   "protocol_version": 1,
   "capabilities": ["coding"],
   "health": [
@@ -475,13 +480,15 @@ For reliable result reception, use a persistent client Session or subscribe befo
 
 ## Configuration reference
 
+Options are grouped the same way the DSH settings form renders them. The resolved configuration stays flat, so the YAML below is unaffected by the grouping.
+
+#### Broker connection
+
 | Option | Default | Description |
 | --- | --- | --- |
 | `url` | `mqtt://127.0.0.1:1883` | `mqtt`, `mqtts`, `ws`, or `wss` broker URL. |
-| `namespace` | `local` | Topic namespace; 1–64 topic-safe characters. |
-| `nodeId` | `dsh-node` | Node topic segment; 1–64 topic-safe characters. |
-| `clientId` | `dsh-mqtt-{namespace}-{nodeId}` | Stable MQTT client ID. |
 | `protocolVersion` | `5` | `5` for MQTT 5, `4` for MQTT 3.1.1. |
+| `clientId` | `dsh-mqtt-{namespace}-{nodeId}` | Stable MQTT client ID. |
 | `clean` | `false` | MQTT clean-session/start flag. Keep `false` for offline command delivery. |
 | `keepaliveSeconds` | `30` | MQTT keepalive. |
 | `connectTimeoutMs` | `10000` | Initial connection timeout. |
@@ -489,21 +496,56 @@ For reliable result reception, use a persistent client Session or subscribe befo
 | `sessionExpirySeconds` | `86400` | MQTT 5 Session expiry; ignored for MQTT 3.1.1. |
 | `username`, `password` | unset | Direct broker credentials. Avoid storing `password` in a profile. |
 | `usernameEnv`, `passwordEnv` | unset | Environment variable names containing broker credentials. Mutually exclusive with direct values. |
+
+#### TLS
+
+| Option | Default | Description |
+| --- | --- | --- |
 | `caFile` | unset | Absolute CA bundle path for TLS. |
 | `certFile`, `keyFile` | unset | Client certificate and private key paths for mutual TLS. |
 | `rejectUnauthorized` | `true` | Verify broker TLS certificates. Do not disable in production. |
-| `stateFile` | `.dsh-mqtt/state.json` | Durable deduplication/result/Session-ownership JSON file. |
+
+#### Node identity
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `namespace` | `local` | Topic namespace; 1–64 topic-safe characters. |
+| `nodeId` | `dsh-node` | Node topic segment; 1–64 topic-safe characters. |
+| `displayName` | the node ID | Name shown to controllers and in the Worker UI. |
+| `capabilities` | `[]` | Informational values published in online presence. |
+
+#### Agents and workspaces
+
+| Option | Default | Description |
+| --- | --- | --- |
 | `workspaces` | `{}` | Alias-to-directory allowlist for new Sessions. |
 | `defaultWorkspace` | unset | Alias used when a new request omits `workspace`. |
 | `allowExternalSessions` | `false` | Permit continuation of Sessions not recorded by this gateway. See the security warning above. |
 | `provider`, `model`, `maxTokens` | current DSH profile selection | Optional Agent creation overrides. `provider` and `model` must be set together; otherwise the gateway reads `ctx.agentDefaultModel`. |
-| `capabilities` | `[]` | Informational values published in online presence. |
 | `eventExposure` | `safe` | `safe` normalized events or `full` raw event data. |
+| `stateFile` | `.dsh-mqtt/state.json` | Durable deduplication/result/Session-ownership JSON file. |
+
+#### Limits
+
+| Option | Default | Description |
+| --- | --- | --- |
 | `maxMessageBytes` | `65536` | Maximum inbound MQTT payload size. |
 | `maxMetadataBytes` | `8192` | Maximum serialized `metadata` size; cannot exceed `maxMessageBytes`. |
 | `maxInputChars` | `32768` | Maximum `input` length in JavaScript characters. |
 | `maxActiveRequests` | `16` | Maximum accepted/active requests. |
 | `dedupTtlSeconds` | `604800` | Terminal request/control retention. |
+| `heartbeatSeconds` | `15` | Interval between retained status publishes. Controllers treat a node as stale after two missed beats. |
+
+#### Management interface
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `managementPort` | `3210` | Port for the management API and standalone page. `0` disables both, and leaves the DSH panel with nothing to read. |
+| `managementHost` | `127.0.0.1` | Bind address. Anything other than loopback requires a management token. |
+| `managementCorsOrigin` | unset | One exact origin allowed to call the API. Unset means loopback origins only, which is what the DSH panel needs. |
+| `managementToken` | unset | Bearer token required by the API. |
+| `managementTokenEnv` | unset | Environment variable holding the management token. Mutually exclusive with `managementToken`. |
+| `requireControllerAuth` | `false` | Require controllers to be invited and approved before they may submit or steer. |
 
 ### Credentials and TLS
 
@@ -621,8 +663,8 @@ pnpm pack
 Releases are tag-driven. Update `package.json` and `CHANGELOG.md`, commit the changes, and push a matching non-prerelease tag:
 
 ```sh
-git tag v0.1.2
-git push origin v0.1.2
+git tag v0.1.3
+git push origin v0.1.3
 ```
 
 The `Release` workflow verifies that the tag matches `package.json`, installs from the frozen lockfile, runs `pnpm check`, publishes the package to npm, and creates a GitHub Release with generated notes. A retry skips npm publication when that exact version already exists. Configure an npm granular automation token as the repository secret `NPM_TOKEN`; it must be allowed to publish `dsh-mqtt`. The workflow intentionally rejects prerelease tags until a separate prerelease policy is defined. Do not create a tag until the version, changelog, and release contents are ready.
@@ -631,7 +673,7 @@ The public module exports the Cordis plugin plus `MqttAgentGateway`, `RequestSto
 
 ## Current limitations
 
-- DSH compatibility is pinned to the rapidly changing `0.1.0-rc.7` APIs.
+- DSH compatibility is pinned to the rapidly changing `0.1.0-rc.8` APIs.
 - The DSH Host does not wait for the broker during plugin startup. If the broker is unavailable or the CONNACK is delayed, the plugin remains loaded and MQTT.js keeps retrying according to `reconnectPeriodMs`; requests and presence are handled after a connection is established.
 - The implemented protocol is node-addressed. Shared-subscription worker pools and workload-class topics are not implemented.
 - There is no arbitrary `reply_to`; response topics are derived from the request ID.

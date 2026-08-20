@@ -7,7 +7,7 @@
 `dsh-mqtt` 可以把一个 DSH 进程变成可通过 MQTT 寻址的 Agent Worker。客户端能够提交任务、观察规范化后的执行事件、对正在运行的回合执行 steer 或 inject、取消任务，并取得有关联 ID 的最终结果。DSH 主机只需主动连接 Broker，因此即使 Worker 位于 NAT 或防火墙之后，也不必对外暴露 HTTP Server。
 
 > [!IMPORTANT]
-> `0.1.2` 新增真实 Worker 管理界面与控制端授权，目前适配 DSH `0.1.0-rc.7`。DSH 本身仍处于 developer preview 阶段，后续可能有破坏性变更。
+> `0.1.3` 把 Worker 界面搬进 DSH 设置面板，并改用 SSE 推送状态，目前适配 DSH `0.1.0-rc.8`。DSH 本身仍处于 developer preview 阶段，后续可能有破坏性变更。
 
 ## 已实现能力
 
@@ -58,7 +58,7 @@
 - `agent.followup()`、`agent.steer()`、`agent.inject()` 和 `agent.cancel()`；
 - `session/event`、`agent/status` 和 `agent/error`。
 
-插件不依赖 DSH Web UI 的内部实现。
+管理界面建立在 DSH 留给第三方客户端代码的唯一扩展点 `ctx.slots` 之上：注册一个 `settings.section` 分区，与内置分区并列，不覆盖其中任何一个。DSH 没有为插件界面提供数据通道，因此面板通过 HTTP 读取插件自己的管理 API。
 
 ## 快速上手
 
@@ -98,7 +98,7 @@ DSH 按 profile 安装插件。第一次使用建议装到 `web` profile，这�
 从 npm 安装：
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web add dsh-mqtt@0.1.2
+npx @deepseek-ai/dsh plugin --profile web add dsh-mqtt@0.1.3
 ```
 
 从本地源码安装：
@@ -131,7 +131,8 @@ Git 依赖会通过包内的 `prepare` 脚本完成构建。pnpm 10 及以上版
     nodeId: mac-mini
     displayName: Mac mini · 开发机
 
-    # Worker 管理界面默认只监听本机 127.0.0.1:3210。
+    # 管理 API 与独立页面默认只监听本机 127.0.0.1:3210。
+    # DSH 设置面板也读这个 API，端口不要关。
     managementHost: 127.0.0.1
     managementPort: 3210
     requireControllerAuth: true
@@ -161,24 +162,28 @@ export DEEPSEEK_API_KEY='...'
 npx @deepseek-ai/dsh --profile web
 ```
 
-### 打开 Worker 管理界面
+### 打开 Worker 界面
 
-插件启动后，在 Worker 所在机器打开：
+Worker 界面有两种形态，背后是同一套面板和同一个 API，按部署情况挑一种即可。
+
+**在 DSH 内。** 打开 DSH 设置，选择 **MQTT Worker**。这是常规入口：不用另开标签页，面板的语言和主题跟随 DSH。它读取 `managementPort` 上的管理 API，本机来源无需额外配置即可访问。如果管理服务不在 `http://127.0.0.1:3210`，在页面上设置 `DSH_MQTT_MANAGEMENT_URL` 指向它的 `/api` 根路径。
+
+**独立页面。** 无头部署或远程 Worker 面前没有 DSH 页面时，插件也会在 Worker 本机提供一个自带页面：
 
 ```text
 http://127.0.0.1:3210/
 ```
 
-这里显示的 Broker、Agent、模型、工作区和任务容量均来自 Gateway 实时检查，不使用演示数据。页面可以生成控制端邀请、确认授权、查看最近使用时间并撤销控制端。设置 `managementPort: 0` 可以关闭管理界面。
+这里显示的 Broker、Agent、模型、工作区和任务容量均来自 Gateway 实时检查，不使用演示数据。两种形态都可以生成控制端邀请、确认授权、查看最近任务与最近使用时间并撤销控制端。更新通过 Server-Sent Events 推送，连接无法保持时自动退回轮询。设置 `managementPort: 0` 会同时关闭 API 与独立页面 —— DSH 面板届时也读不到任何数据。
 
-管理服务默认只绑定 loopback。若把 `managementHost` 设置为 `0.0.0.0` 或其他非本机地址，必须同时设置 `managementToken` 或 `managementTokenEnv`；界面会要求输入 token，并且只在当前浏览器会话中保存，API 调用则需发送 `Authorization: Bearer <token>`。除非显式设置 `managementCorsOrigin`，否则管理 API 不允许跨域访问。不要把未认证的管理端口暴露到局域网或互联网。
+管理服务默认只绑定 loopback。若把 `managementHost` 设置为 `0.0.0.0` 或其他非本机地址，必须同时设置 `managementToken` 或 `managementTokenEnv`；界面会要求输入 token，并且只在当前标签页的 `sessionStorage` 中保存，API 调用则需发送 `Authorization: Bearer <token>`。跨域请求默认放行本机来源，这正是 DSH 面板所需；也可以设置 `managementCorsOrigin` 指定唯一的精确来源。不要把未认证的管理端口暴露到局域网或互联网。
 
 ### 添加控制端
 
-1. 在 Worker 管理界面点击“添加控制端”，输入名称并生成十分钟有效的配置。
+1. 在 Worker 界面点击“添加控制端”，输入名称并生成十分钟有效的配置。
 2. 把配置复制到控制端；配置只包含 Broker 地址、namespace、节点 ID、控制端 ID 和一次性 token，不包含 Worker 的 Broker 密码或模型凭据。
 3. 控制端仍需配置独立的 Broker 凭据，并按下面的 ACL 仅访问目标节点。
-4. 回到 Worker 管理界面确认授权。启用 `requireControllerAuth: true` 后，未授权、已过期或已撤销的 token 无法提交或控制任务。
+4. 回到 Worker 界面确认授权。启用 `requireControllerAuth: true` 后，未授权、已过期或已撤销的 token 无法提交或控制任务。
 
 程序化控制端可以直接使用包导出的 `MqttControllerClient`。它会自动在提交和控制消息中携带 `controller_id` 与 `token`，订阅节点状态、事件和结果，并提供 `waitForResult()`。
 
@@ -431,7 +436,7 @@ dsh/v1/{namespace}/nodes/{nodeId}/status
   "request_capacity": 16,
   "workspaces": [{ "alias": "repo-foo", "status": "ready" }],
   "controller_auth_required": true,
-  "gateway_version": "0.1.2",
+  "gateway_version": "0.1.3",
   "protocol_version": 1,
   "capabilities": ["coding"],
   "health": [
@@ -475,13 +480,15 @@ QoS 1 出站消息在 MQTT.js 接收到 outgoing store 后即返回，不会无�
 
 ## 配置参考
 
+配置项按 DSH 设置表单的分组方式列出。解析后的配置对象仍是扁平结构，分组不影响下面的 YAML 写法。
+
+#### Broker 连接
+
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
 | `url` | `mqtt://127.0.0.1:1883` | `mqtt`、`mqtts`、`ws` 或 `wss` Broker URL。 |
-| `namespace` | `local` | Topic namespace；1–64 个安全字符。 |
-| `nodeId` | `dsh-node` | 节点 Topic segment；1–64 个安全字符。 |
-| `clientId` | `dsh-mqtt-{namespace}-{nodeId}` | 稳定的 MQTT client ID。 |
 | `protocolVersion` | `5` | MQTT 5 使用 `5`，MQTT 3.1.1 使用 `4`。 |
+| `clientId` | `dsh-mqtt-{namespace}-{nodeId}` | 稳定的 MQTT client ID。 |
 | `clean` | `false` | MQTT clean session/start。需要离线接收命令时保持 `false`。 |
 | `keepaliveSeconds` | `30` | MQTT keepalive。 |
 | `connectTimeoutMs` | `10000` | 首次连接超时。 |
@@ -489,21 +496,56 @@ QoS 1 出站消息在 MQTT.js 接收到 outgoing store 后即返回，不会无�
 | `sessionExpirySeconds` | `86400` | MQTT 5 Session 过期时间；MQTT 3.1.1 下忽略。 |
 | `username`、`password` | 未设置 | 直接配置 Broker 凭据。不建议在 profile 中保存 `password`。 |
 | `usernameEnv`、`passwordEnv` | 未设置 | 保存 Broker 凭据的环境变量名；不能与对应直接值同时配置。 |
+
+#### TLS
+
+| 配置项 | 默认值 | 说明 |
+| --- | --- | --- |
 | `caFile` | 未设置 | TLS CA bundle 的绝对路径。 |
 | `certFile`、`keyFile` | 未设置 | 双向 TLS 客户端证书与私钥路径。 |
 | `rejectUnauthorized` | `true` | 验证 Broker TLS 证书；生产环境不要关闭。 |
-| `stateFile` | `.dsh-mqtt/state.json` | 持久化去重、结果和 Session 归属的 JSON 文件。 |
+
+#### 节点身份
+
+| 配置项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `namespace` | `local` | Topic namespace；1–64 个安全字符。 |
+| `nodeId` | `dsh-node` | 节点 Topic segment；1–64 个安全字符。 |
+| `displayName` | 节点 ID | 展示给控制端和 Worker 界面的名称。 |
+| `capabilities` | `[]` | 在线 Presence 中发布的描述性能力列表。 |
+
+#### Agent 与工作区
+
+| 配置项 | 默认值 | 说明 |
+| --- | --- | --- |
 | `workspaces` | `{}` | 新 Session 可选择的“别名 → 目录”白名单。 |
 | `defaultWorkspace` | 未设置 | 新请求未提供 `workspace` 时使用的别名。 |
 | `allowExternalSessions` | `false` | 允许续接未被本网关记录的 Session；务必阅读上文安全说明。 |
 | `provider`、`model`、`maxTokens` | 当前 DSH profile 选择 | 可选的 Agent 创建参数覆盖。`provider` 和 `model` 必须同时设置；否则网关会读取 `ctx.agentDefaultModel`。 |
-| `capabilities` | `[]` | 在线 Presence 中发布的描述性能力列表。 |
 | `eventExposure` | `safe` | `safe` 规范化事件，或 `full` 原始事件数据。 |
+| `stateFile` | `.dsh-mqtt/state.json` | 持久化去重、结果和 Session 归属的 JSON 文件。 |
+
+#### 限额
+
+| 配置项 | 默认值 | 说明 |
+| --- | --- | --- |
 | `maxMessageBytes` | `65536` | MQTT 入站 payload 最大字节数。 |
 | `maxMetadataBytes` | `8192` | `metadata` 序列化后的最大字节数，不得超过 `maxMessageBytes`。 |
 | `maxInputChars` | `32768` | `input` 的最大 JavaScript 字符数。 |
 | `maxActiveRequests` | `16` | accepted/active 请求总数上限。 |
 | `dedupTtlSeconds` | `604800` | 最终请求和控制去重记录保留时间。 |
+| `heartbeatSeconds` | `15` | 发布 retained 状态的间隔。连续两次心跳缺失后，控制端会判定节点已失联。 |
+
+#### 管理界面
+
+| 配置项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `managementPort` | `3210` | 管理 API 与独立页面的端口。`0` 会同时关闭两者，DSH 面板届时也读不到数据。 |
+| `managementHost` | `127.0.0.1` | 绑定地址。非 loopback 地址必须配置管理 token。 |
+| `managementCorsOrigin` | 未设置 | 允许调用 API 的唯一精确来源。留空表示只放行本机来源，这正是 DSH 面板所需。 |
+| `managementToken` | 未设置 | 调用 API 所需的 Bearer token。 |
+| `managementTokenEnv` | 未设置 | 保存管理 token 的环境变量名；不能与 `managementToken` 同时配置。 |
+| `requireControllerAuth` | `false` | 要求控制端先经邀请与授权，才能提交或控制任务。 |
 
 ### 凭据与 TLS
 
@@ -621,8 +663,8 @@ pnpm pack
 发布由 Git tag 驱动。先更新 `package.json` 和 `CHANGELOG.md`，提交后推送与版本一致的正式 tag：
 
 ```sh
-git tag v0.1.2
-git push origin v0.1.2
+git tag v0.1.3
+git push origin v0.1.3
 ```
 
 `Release` 工作流会校验 tag 是否与 `package.json` 一致，使用锁文件安装依赖，运行完整的 `pnpm check`，发布 npm 包，并创建带自动生成说明的 GitHub Release；若重试时该版本已经存在于 npm，则会跳过重复发布。请在仓库 Secrets 中配置名为 `NPM_TOKEN` 的 npm granular automation token，并确保它有权发布 `dsh-mqtt`。在单独定义预发布策略前，工作流会拒绝预发布 tag。只有版本号、变更日志和发布内容都准备好后，才应创建 tag。
@@ -631,7 +673,7 @@ git push origin v0.1.2
 
 ## 当前限制
 
-- 当前 DSH 兼容性固定在仍快速变化的 `0.1.0-rc.7` API。
+- 当前 DSH 兼容性固定在仍快速变化的 `0.1.0-rc.8` API。
 - DSH Host 启动插件时不会等待 Broker。如果 Broker 不可用或 CONNACK 延迟，插件仍会完成加载，MQTT.js 会按 `reconnectPeriodMs` 持续重试；建立连接后才会处理请求并发布 Presence。
 - 已实现的是节点寻址协议；shared subscription Worker Pool 和 workload class Topic 尚未实现。
 - 不支持任意 `reply_to`，响应 Topic 由请求 ID 推导。
