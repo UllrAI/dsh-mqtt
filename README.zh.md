@@ -87,7 +87,6 @@ Mosquitto 2 在未配置 listener 时只绑定本机。不要把匿名开发 Bro
 | [RunMQTT](https://runmqtt.com/) | 提供隔离的托管 Broker、设备身份、可复用 Topic 策略，以及 MQTT over TLS 和安全 WebSocket 接入。 |
 | [EMQX Cloud](https://www.emqx.com/zh/cloud) | 全托管 MQTT 服务，支持 retained message、shared subscription、规则与数据集成。 |
 | [HiveMQ Cloud](https://www.hivemq.com/products/mqtt-cloud-broker/) | 托管 MQTT 3.1.1/5 服务，支持 TLS、WebSocket、凭据和 Topic 权限。 |
-| [shiftr.io](https://www.shiftr.io/) | 云 MQTT 平台，提供连接/Topic 可视化，以及 HTTP 和 Webhook 集成。 |
 
 把服务商生成的端点、端口、用户名和密码填入下文连接示例即可。生产使用前，请根据服务商最新文档确认协议版本、区域、认证方式、ACL、持久 Session 和配额。列入此表不表示其所有套餐都支持表中全部能力。
 
