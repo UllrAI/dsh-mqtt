@@ -2,6 +2,40 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.1.5 - 2026-08-21
+
+### Added
+
+- The task history can stop a running task. Cancellation goes through the same queue as an MQTT `request.cancel`, so an operator and a controller cannot race, and a controller watching the request sees an operator's cancel exactly as it would see its own.
+- `GET /api/stream` accepts a single-use ticket from `POST /api/stream/tickets`. `EventSource` cannot send an `Authorization` header, so a token-protected gateway previously fell back to polling; the ticket expires in 15 seconds and is spent on first use, while the bearer token stays in a header for clients that can send one.
+- A failure reason on the history row itself, rather than only inside the task dialog.
+- The task dialog reports how long a request ran, which workspace it used, and which controller submitted it.
+- Approve is available in the invitation dialog, so issuing an invite and granting it are one step for the operator doing both.
+- The node's Last Will payload now carries the same field set as a live status, so a controller can decode both with one parser.
+
+### Changed
+
+- Pushed updates are applied where they land instead of triggering a reload. Every output chunk used to cost four requests; a status now applies verbatim and a result folds into its row, leaving reloads for what an update cannot answer on its own.
+- Pending controllers are named above their rows. The section count covers approved controllers only, so the rows above it read as a contradiction.
+- Gateway work is serialized per session instead of on one global queue. QoS 1 publishes are awaits, so a slow acknowledgement for one session was holding up every other session's events.
+- `requireControllerAuth` left off means broker credentials alone are enough to run agent work on a node. The default is unchanged, but the gateway now warns at startup, and the schema, the connection dialog, and both READMEs say so plainly.
+- `maxInputChars` above `maxMessageBytes` is rejected at startup. A character costs at least a byte and the size check runs first, so such a configuration described a limit that could never apply.
+- `GET /api/requests` returns rows projected for the UI. The stored record also holds the request fingerprint and the control-dedup table, neither of which a client needs.
+- `?limit` on `GET /api/requests` is clamped to the server's page size instead of being honoured as given.
+- Health rows are labelled and translated in the UI instead of showing protocol identifiers, and the workspace count reads ready-over-total so "2" cannot be mistaken for "all of them".
+- Unexpected server errors answer a generic message and log the detail, instead of returning text that could describe the filesystem or the broker.
+- The state file is flushed before its rename and written compactly.
+
+### Fixed
+
+- A broker error after a successful connect no longer takes the host down. `mqtt.js` reconnects on its own, but an unhandled `error` event threw; `MqttControllerClient` now keeps a permanent listener and exposes `onError`.
+- A request whose agent session went idle without ever running is no longer reported as completed — a resumed session is idle by definition. One that failed before running is still finalized, so it cannot hold a capacity slot indefinitely.
+- A turn-end kind the gateway does not know falls back to `TURN_FAILED` instead of inventing an error code no controller can handle.
+- A control command that was rejected or failed to deliver releases its command id, so the controller can retry it instead of finding the id permanently consumed.
+- The controller client's cache of unclaimed results is bounded, and the session ledger is capped and evicts least-recently-seen.
+- Revoked controllers past their expiry are pruned from the state file.
+- A management client that stops reading the SSE stream no longer grows the server's write buffer without bound.
+
 ## 0.1.4 - 2026-08-21
 
 ### Changed

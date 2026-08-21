@@ -7,7 +7,7 @@ MQTT protocol driver and agent worker gateway for [DeepSeek Harness (DSH)](https
 `dsh-mqtt` turns a DSH process into an MQTT-addressable agent worker. A client can submit work, observe normalized execution events, steer or inject context into a running turn, cancel it, and receive a correlated final result. The DSH host only makes an outbound broker connection, so the worker can stay behind NAT or a firewall without exposing an HTTP server.
 
 > [!IMPORTANT]
-> Version `0.1.4` adds a language switch to the standalone Worker page and publishes through npm trusted publishing. It currently targets DSH `0.1.0-rc.8`. DSH itself is a developer preview and may introduce breaking changes.
+> Version `0.1.5` lets the operator stop a running task, keeps one slow session from stalling the others, and says plainly when controller approval is off. It currently targets DSH `0.1.0-rc.8`. DSH itself is a developer preview and may introduce breaking changes.
 
 ## What it provides
 
@@ -97,7 +97,7 @@ DSH installs plugins into a profile. The `web` profile is convenient for a first
 From npm:
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web add dsh-mqtt@0.1.4
+npx @deepseek-ai/dsh plugin --profile web add dsh-mqtt@0.1.5
 ```
 
 From a local checkout:
@@ -439,7 +439,7 @@ The gateway publishes retained online status after each successful connection:
   "request_capacity": 16,
   "workspaces": [{ "alias": "repo-foo", "status": "ready" }],
   "controller_auth_required": true,
-  "gateway_version": "0.1.4",
+  "gateway_version": "0.1.5",
   "protocol_version": 1,
   "capabilities": ["coding"],
   "health": [
@@ -666,8 +666,8 @@ pnpm pack
 Releases are tag-driven. Update `package.json` and `CHANGELOG.md`, commit the changes, and push a matching non-prerelease tag:
 
 ```sh
-git tag v0.1.4
-git push origin v0.1.4
+git tag v0.1.5
+git push origin v0.1.5
 ```
 
 The `Release` workflow verifies that the tag matches `package.json`, installs from the frozen lockfile, runs `pnpm check`, publishes the package to npm, and creates a GitHub Release with generated notes. A retry skips npm publication when that exact version already exists. Publishing uses [trusted publishing](https://docs.npmjs.com/trusted-publishers/): the job mints a short-lived OIDC token and trades it for publish rights, so there is no long-lived secret to rotate and every release carries a provenance attestation. This requires a trusted publisher on npmjs.com naming this repository and `release.yml`. The workflow intentionally rejects prerelease tags until a separate prerelease policy is defined. Do not create a tag until the version, changelog, and release contents are ready.
