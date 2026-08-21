@@ -21,6 +21,7 @@ export const PANEL_CSS = `
 .dsh-mqtt-panel p { margin: 0; }
 
 .dsh-mqtt-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.dsh-mqtt-head-aside { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
 .dsh-mqtt-live { display: inline-flex; align-items: center; gap: 6px; color: var(--dsw-alias-label-tertiary); font-size: 13px; white-space: nowrap; }
 
 .dsh-mqtt-muted { color: var(--dsw-alias-label-tertiary); }

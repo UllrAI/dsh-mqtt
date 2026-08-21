@@ -4,6 +4,11 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- The standalone page has a language switch in its header and remembers the choice, matching what the DSH shell already does for the settings panel.
+- Screenshots of the Worker UI in both READMEs.
+
 ## 0.1.3 - 2026-08-21
 
 ### Added

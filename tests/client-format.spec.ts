@@ -16,10 +16,8 @@ const t = createTranslate('en')
 
 describe('i18n', () => {
   it('translates through the dictionary matching the locale', () => {
-    expect(createTranslate('en-US')('stateReady')).toBe(en.stateReady)
-    expect(createTranslate('zh-CN')('stateReady')).toBe(zh.stateReady)
-    expect(createTranslate('ZH')('stateReady')).toBe(zh.stateReady)
-    expect(createTranslate('fr')('stateReady')).toBe(en.stateReady)
+    expect(createTranslate('en')('stateReady')).toBe(en.stateReady)
+    expect(createTranslate('zh')('stateReady')).toBe(zh.stateReady)
   })
 
   it('covers every English key in Chinese', () => {

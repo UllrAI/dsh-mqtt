@@ -78,6 +78,8 @@ export const en = {
   close: 'Close',
   done: 'Done',
 
+  language: 'Language',
+
   connectionTitle: 'Broker and advanced',
   brokerUrl: 'Broker URL',
   namespace: 'Namespace',
@@ -165,6 +167,8 @@ export const zh: Dictionary = {
   close: '关闭',
   done: '完成',
 
+  language: '语言',
+
   connectionTitle: 'Broker 与高级设置',
   brokerUrl: 'Broker 地址',
   namespace: '命名空间',
@@ -179,6 +183,11 @@ export const zh: Dictionary = {
 
 export type Translate = (key: keyof Dictionary, params?: Record<string, string | number>) => string
 
+/** Shipped dictionaries, named the way DSH's own locale plugin names them. */
+export type LocaleId = 'en' | 'zh'
+
+const DICTIONARIES: Record<LocaleId, Dictionary> = { en, zh }
+
 export function interpolate(template: string, params?: Record<string, string | number>): string {
   if (params === undefined) return template
   return template.replaceAll(/\{(\w+)\}/g, (match, key: string) => {
@@ -188,7 +197,7 @@ export function interpolate(template: string, params?: Record<string, string | n
 }
 
 /** Standalone translator; the DSH panel uses `ctx.locale` instead. */
-export function createTranslate(locale: string): Translate {
-  const dictionary = locale.toLowerCase().startsWith('zh') ? zh : en
+export function createTranslate(locale: LocaleId): Translate {
+  const dictionary = DICTIONARIES[locale]
   return (key, params) => interpolate(dictionary[key], params)
 }
