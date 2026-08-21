@@ -15,21 +15,23 @@ class FakeEventSource {
   onopen: (() => void) | undefined
   onerror: (() => void) | undefined
   closed = false
-  private readonly handlers = new Map<string, Array<() => void>>()
+  private readonly handlers = new Map<string, Array<(message: { data: unknown }) => void>>()
 
   constructor(readonly url: string) {
     if (FakeEventSource.failConstruction) throw new Error('blocked')
     FakeEventSource.instances.push(this)
   }
 
-  addEventListener(type: string, handler: () => void): void {
+  addEventListener(type: string, handler: (message: { data: unknown }) => void): void {
     const existing = this.handlers.get(type) ?? []
     existing.push(handler)
     this.handlers.set(type, existing)
   }
 
-  emit(type: string): void {
-    for (const handler of this.handlers.get(type) ?? []) handler()
+  /** Omit `payload` to deliver a notice the store cannot read, as a stray frame would. */
+  emit(type: string, payload?: unknown): void {
+    const data = payload === undefined ? undefined : JSON.stringify(payload)
+    for (const handler of this.handlers.get(type) ?? []) handler({ data })
   }
 
   close(): void {
@@ -157,7 +159,7 @@ describe('ManagementStore', () => {
     expect(client.status).toHaveBeenCalledTimes(3)
   })
 
-  it('opens the stream and refreshes on every notice kind', async () => {
+  it('opens the stream and reloads on an unreadable notice of any kind', async () => {
     vi.useFakeTimers()
     const client = stubClient()
     const store = createStore(client)
@@ -170,20 +172,95 @@ describe('ManagementStore', () => {
     source?.onopen?.()
     expect(store.getState().live).toBe(true)
 
-    source?.emit('status')
-    await vi.advanceTimersByTimeAsync(500)
-    await settle()
-    expect(client.status).toHaveBeenCalledTimes(2)
+    let reloads = 1
+    for (const kind of ['status', 'result', 'event']) {
+      source?.emit(kind)
+      await vi.advanceTimersByTimeAsync(500)
+      await settle()
+      reloads += 1
+      expect(client.status).toHaveBeenCalledTimes(reloads)
+    }
+  })
 
-    source?.emit('result')
-    await vi.advanceTimersByTimeAsync(500)
+  it('applies a pushed status without re-reading the endpoints', async () => {
+    vi.useFakeTimers()
+    const client = stubClient()
+    const store = createStore(client)
+    store.start()
     await settle()
-    expect(client.status).toHaveBeenCalledTimes(3)
 
-    source?.emit('event')
+    FakeEventSource.instances[0]?.emit('status', { status: { node_id: 'worker', state: 'busy' } })
     await vi.advanceTimersByTimeAsync(500)
     await settle()
-    expect(client.status).toHaveBeenCalledTimes(4)
+
+    expect(store.getState().status).toMatchObject({ state: 'busy' })
+    expect(client.status).toHaveBeenCalledTimes(1)
+  })
+
+  it('folds a pushed result into the row it belongs to', async () => {
+    vi.useFakeTimers()
+    const client = stubClient({ requests: vi.fn().mockResolvedValue([{ id: 'r1', status: 'active', updatedAt: 1 }]) })
+    const store = createStore(client)
+    store.start()
+    await settle()
+
+    FakeEventSource.instances[0]?.emit('result', {
+      result: {
+        id: 'r1',
+        status: 'failed',
+        timestamp: '2026-08-21T10:00:00Z',
+        session_id: 'session-1',
+        error: { code: 'AGENT_ERROR', message: 'boom' },
+      },
+    })
+    await vi.advanceTimersByTimeAsync(500)
+    await settle()
+
+    expect(store.getState().requests[0]).toMatchObject({
+      id: 'r1',
+      status: 'failed',
+      sessionId: 'session-1',
+      updatedAt: Date.parse('2026-08-21T10:00:00Z'),
+      result: { status: 'failed', error: { code: 'AGENT_ERROR', message: 'boom' } },
+    })
+    expect(client.requests).toHaveBeenCalledTimes(1)
+  })
+
+  it('reloads for a result about a request it has never seen', async () => {
+    vi.useFakeTimers()
+    const client = stubClient()
+    const store = createStore(client)
+    store.start()
+    await settle()
+
+    FakeEventSource.instances[0]?.emit('result', { result: { id: 'unknown', status: 'completed' } })
+    await vi.advanceTimersByTimeAsync(500)
+    await settle()
+
+    expect(client.requests).toHaveBeenCalledTimes(2)
+  })
+
+  it('reloads on the first event of an accepted request and ignores the rest', async () => {
+    vi.useFakeTimers()
+    const requests = vi.fn()
+      .mockResolvedValueOnce([{ id: 'r1', status: 'accepted' }])
+      .mockResolvedValue([{ id: 'r1', status: 'active' }])
+    const client = stubClient({ requests })
+    const store = createStore(client)
+    store.start()
+    await settle()
+
+    const source = FakeEventSource.instances[0]
+    // The accepted -> active flip is visible; output deltas are not.
+    source?.emit('event', { event: { id: 'r1' } })
+    await vi.advanceTimersByTimeAsync(500)
+    await settle()
+    expect(client.requests).toHaveBeenCalledTimes(2)
+
+    for (let index = 0; index < 20; index += 1) source?.emit('event', { event: { id: 'r1' } })
+    await vi.advanceTimersByTimeAsync(500)
+    await settle()
+    expect(client.requests).toHaveBeenCalledTimes(2)
   })
 
   it('collapses a burst of notices into one reload', async () => {

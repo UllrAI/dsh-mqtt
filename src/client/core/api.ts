@@ -63,12 +63,23 @@ export interface RequestRecord {
   createdAt: number
   updatedAt: number
   sessionId?: string
+  workspace?: string
+  controllerId?: string
+  cancelRequested?: boolean
   result?: {
     status?: string
     summary?: string
     error?: { code: string; message: string }
   }
 }
+
+/** A request is still ours to stop only before it reaches a terminal state. */
+export function isRequestActive(record: RequestRecord): boolean {
+  return record.status === 'accepted' || record.status === 'active'
+}
+
+/** One page of history; the server caps its own `limit` to the same value. */
+export const REQUEST_PAGE_SIZE = 50
 
 export class ManagementApiError extends Error {
   constructor(
@@ -139,9 +150,32 @@ export class ManagementClient {
     return body.controllers ?? []
   }
 
-  async requests(limit = 50): Promise<RequestRecord[]> {
+  async requests(limit = REQUEST_PAGE_SIZE): Promise<RequestRecord[]> {
     const body = await this.request<{ requests?: RequestRecord[] }>(`/requests?limit=${limit}`)
     return body.requests ?? []
+  }
+
+  /**
+   * Ask the worker to stop a task.
+   *
+   * Cancellation is a request, not a guarantee: the agent may already be
+   * finishing. The row stays visible until the worker reports a terminal state.
+   */
+  async cancelRequest(id: string): Promise<void> {
+    await this.request(`/requests/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: '{}' })
+  }
+
+  /**
+   * A short-lived ticket that authorises one SSE connection.
+   *
+   * `EventSource` cannot carry an Authorization header, so a token-protected
+   * gateway would otherwise be stuck on polling. The ticket travels in the query
+   * string — hence single-use and near-instant expiry — while the bearer token
+   * stays in a header.
+   */
+  async streamTicket(): Promise<string> {
+    const body = await this.request<{ ticket: string }>('/stream/tickets', { method: 'POST', body: '{}' })
+    return body.ticket
   }
 
   async createInvite(name: string, ttlSeconds = 600): Promise<ControllerInvite> {

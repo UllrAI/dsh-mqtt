@@ -76,8 +76,17 @@ describe('ManagementServer', () => {
     expect(await fetch(`${base}/requests?limit=5`).then(response => response.json())).toEqual({ requests: [] })
     expect(gateway.listRequests).toHaveBeenCalledWith(5)
 
-    await fetch(`${base}/controllers/${invite.id}/authorize`, { method: 'POST' })
+    await fetch(`${base}/controllers/${invite.id}/authorize`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+    })
     expect(gateway.authorizeController).toHaveBeenCalledWith(invite.id)
+    // A CORS-safelisted content type would let a foreign form POST here without
+    // a preflight, so mutations demand JSON.
+    expect((await fetch(`${base}/controllers/${invite.id}/authorize`, {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain' },
+    })).status).toBe(415)
     await fetch(`${base}/controllers/${invite.id}`, { method: 'DELETE' })
     expect(gateway.revokeController).toHaveBeenCalledWith(invite.id)
     expect((await fetch(`${base}/missing`)).status).toBe(404)
@@ -103,6 +112,68 @@ describe('ManagementServer', () => {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ name: 'MacBook', scopes: 'submit' }),
     })).status).toBe(400)
+  })
+
+  it('translates a cancel outcome into the status the operator deserves', async () => {
+    const port = await freePort()
+    const config = resolveConfig({
+      url: 'mqtt://broker.test:1883',
+      namespace: 'test',
+      nodeId: 'worker',
+      managementPort: port,
+    })
+    const cancelRequest = vi.fn()
+      .mockResolvedValueOnce({ reason: 'requested' })
+      .mockResolvedValueOnce({ reason: 'not-found' })
+      .mockResolvedValueOnce({ reason: 'not-active' })
+    const gateway = { cancelRequest } as unknown as MqttAgentGateway
+    const server = new ManagementServer({ gateway, config, logger: logger() })
+    servers.push(server)
+    await server.start()
+    const cancel = (id: string): Promise<Response> => fetch(
+      `http://127.0.0.1:${port}/api/requests/${id}/cancel`,
+      { method: 'POST', headers: { 'content-type': 'application/json' } },
+    )
+
+    // Accepted, not completed: the agent may still be finishing.
+    expect((await cancel('req%2F1')).status).toBe(202)
+    expect(cancelRequest).toHaveBeenCalledWith('req/1')
+    expect((await cancel('gone')).status).toBe(404)
+    expect((await cancel('done')).status).toBe(409)
+    expect((await fetch(`http://127.0.0.1:${port}/api/requests/req-1/cancel`, { method: 'POST' })).status).toBe(415)
+  })
+
+  it('issues a single-use stream ticket that EventSource can spend once', async () => {
+    const port = await freePort()
+    const config = resolveConfig({
+      url: 'mqtt://broker.test:1883',
+      namespace: 'test',
+      nodeId: 'worker',
+      managementPort: port,
+      managementToken: 'management-secret',
+    })
+    const gateway = { subscribe: vi.fn(() => () => undefined) } as unknown as MqttAgentGateway
+    const server = new ManagementServer({ gateway, config, logger: logger() })
+    servers.push(server)
+    await server.start()
+    const base = `http://127.0.0.1:${port}/api`
+    const auth = { 'content-type': 'application/json', authorization: 'Bearer management-secret' }
+
+    // The ticket itself is behind the bearer token; only the stream may use one.
+    expect((await fetch(`${base}/stream/tickets`, { method: 'POST' })).status).toBe(401)
+    const issued = await fetch(`${base}/stream/tickets`, { method: 'POST', headers: auth })
+    expect(issued.status).toBe(201)
+    const { ticket } = await issued.json() as { ticket: string }
+    expect(ticket).toMatch(/^[\w-]{20,}$/)
+
+    const stream = await fetch(`${base}/stream?ticket=${ticket}`)
+    expect(stream.status).toBe(200)
+    expect(stream.headers.get('content-type')).toContain('text/event-stream')
+    await stream.body?.cancel()
+
+    // Spent: a replayed query string buys nothing.
+    expect((await fetch(`${base}/stream?ticket=${ticket}`)).status).toBe(401)
+    expect((await fetch(`${base}/stream?ticket=forged`)).status).toBe(401)
   })
 
   it('requires a bearer token when management authentication is configured', async () => {
@@ -148,9 +219,11 @@ describe('ManagementServer', () => {
       expect(response.headers.get('vary')).toBe('origin')
     }
 
+    // A cross-site caller is refused server-side, not merely denied the response:
+    // CORS alone would still let the handler run.
     for (const origin of ['https://evil.example.com', 'null']) {
       const response = await fetch(url, { headers: { origin } })
-      expect(response.status).toBe(200)
+      expect(response.status).toBe(403)
       expect(response.headers.get('access-control-allow-origin')).toBeNull()
     }
 

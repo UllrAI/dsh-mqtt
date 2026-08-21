@@ -186,7 +186,7 @@ The management server binds to loopback by default. A non-loopback `managementHo
 1. Select **Add controller** in the Worker UI and generate a ten-minute invitation.
 2. Copy the invitation to the controller. It contains the Broker URL, namespace, node ID, controller ID, and application token, but no Worker Broker password or model credential.
 3. Configure separate Broker credentials on the controller with node-scoped ACLs.
-4. Approve the pending controller in the Worker UI. With `requireControllerAuth: true`, pending, expired, or revoked tokens cannot submit or control work.
+4. Approve the controller — either in the invitation dialog you just used, or later from the pending list. With `requireControllerAuth: true`, pending, expired, or revoked tokens cannot submit or control work.
 
 Programmatic controllers can use the exported `MqttControllerClient`. It adds `controller_id` and `token` to commands, subscribes to status/events/results, and provides `waitForResult()`.
 
@@ -548,7 +548,7 @@ Options are grouped the same way the DSH settings form renders them. The resolve
 | `managementCorsOrigin` | unset | One exact origin allowed to call the API. Unset means loopback origins only, which is what the DSH panel needs. |
 | `managementToken` | unset | Bearer token required by the API. |
 | `managementTokenEnv` | unset | Environment variable holding the management token. Mutually exclusive with `managementToken`. |
-| `requireControllerAuth` | `false` | Require controllers to be invited and approved before they may submit or steer. |
+| `requireControllerAuth` | `false` | Require controllers to be invited and approved before they may submit or steer. Left off, broker credentials alone are enough to run agent work on this node, so the gateway warns at startup. |
 
 ### Credentials and TLS
 

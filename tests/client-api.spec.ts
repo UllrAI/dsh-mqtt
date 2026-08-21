@@ -122,6 +122,36 @@ describe('ManagementClient', () => {
     })
   })
 
+  it('escapes the request id when asking the worker to stop a task', async () => {
+    const fetchSpy = stubFetch(() => jsonResponse({ ok: true }, 202))
+
+    await expect(client().cancelRequest('req/1')).resolves.toBeUndefined()
+    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('http://gateway.test/api/requests/req%2F1/cancel')
+    expect(init.method).toBe('POST')
+    // A body makes it a JSON request, which the gateway demands of mutations.
+    expect(init.body).toBe('{}')
+  })
+
+  it('reports a stop the gateway refused', async () => {
+    stubFetch(() => jsonResponse({ error: 'request is no longer running' }, 409))
+
+    await expect(client().cancelRequest('req-1')).rejects.toMatchObject({
+      message: 'request is no longer running',
+      status: 409,
+    })
+  })
+
+  it('fetches a stream ticket over POST, keeping the bearer token in a header', async () => {
+    const fetchSpy = stubFetch(() => jsonResponse({ ticket: 'one-shot' }, 201))
+
+    await expect(client(() => 'management-secret').streamTicket()).resolves.toBe('one-shot')
+    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('http://gateway.test/api/stream/tickets')
+    expect(init.method).toBe('POST')
+    expect(init.headers).toMatchObject({ authorization: 'Bearer management-secret' })
+  })
+
   it('escapes controller ids in authorize and revoke paths', async () => {
     const fetchSpy = stubFetch(() => jsonResponse({}))
     const api = client()

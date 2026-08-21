@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type {
   AgentAction,
   AgentHostHandlers,
@@ -38,8 +38,13 @@ class FakeTransport implements GatewayTransport {
     await handlers.onConnect()
   }
 
+  /** Optional gate, so a test can hold one publish open and watch others proceed. */
+  beforePublish: ((value: Record<string, unknown>) => Promise<void> | void) | undefined
+
   async publish(topic: string, payload: string, options: PublishOptions): Promise<void> {
-    this.publications.push({ topic, value: JSON.parse(payload) as Record<string, unknown>, options })
+    const value = JSON.parse(payload) as Record<string, unknown>
+    await this.beforePublish?.(value)
+    this.publications.push({ topic, value, options })
   }
 
   async stop(): Promise<void> {
@@ -314,6 +319,37 @@ describe('MqttAgentGateway', () => {
     expect(fixture.logger.errors).toEqual([])
   })
 
+  it('keeps one session\'s slow publish from stalling another session', async () => {
+    const fixture = await setup()
+    await inbound(fixture, fixture.gateway.topics.requests, submit('slow'))
+    await inbound(fixture, fixture.gateway.topics.requests, submit('fast'))
+
+    let release = (): void => undefined
+    const held = new Promise<void>(resolve => { release = resolve })
+    fixture.transport.beforePublish = value => {
+      // Hold only the stuck session's event; everything else publishes at once.
+      if (value.id === 'slow' && value.type === 'agent.output.delta') return held
+      return undefined
+    }
+
+    const chunk = (text: string): unknown => ({
+      seq: 4,
+      type: 'assistant/chunk',
+      data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text } },
+    })
+    fixture.host.event('session-slow', chunk('Slow'))
+    fixture.host.event('session-fast', chunk('Fast'))
+
+    // A single shared chain would leave this at zero until the held publish settles.
+    await vi.waitFor(() => expect(publications(fixture, 'agent.output.delta')).toHaveLength(1))
+    expect(publications(fixture, 'agent.output.delta')[0]?.value.id).toBe('fast')
+
+    release()
+    await fixture.gateway.whenIdle()
+    expect(publications(fixture, 'agent.output.delta').map(item => item.value.id)).toEqual(['fast', 'slow'])
+    expect(fixture.logger.errors).toEqual([])
+  })
+
   it('deduplicates submits and rejects conflicting request ids', async () => {
     const fixture = await setup()
     await inbound(fixture, fixture.gateway.topics.requests, submit('same'))
@@ -328,6 +364,7 @@ describe('MqttAgentGateway', () => {
     })
     expect(fixture.host.sends).toHaveLength(1)
 
+    fixture.host.status('session-same', 'running')
     fixture.host.event('session-same', {
       seq: 1,
       type: 'turn/end',
@@ -361,6 +398,7 @@ describe('MqttAgentGateway', () => {
     expect(fixture.host.cancellations).toEqual(['session-req-control'])
     expect(publications(fixture, 'request.control.duplicate')).toHaveLength(1)
 
+    fixture.host.status('session-req-control', 'running')
     fixture.host.event('session-req-control', {
       seq: 4,
       type: 'turn/end',
@@ -409,6 +447,7 @@ describe('MqttAgentGateway', () => {
     expect(fixture.host.acquisitions).toHaveLength(0)
 
     await inbound(fixture, fixture.gateway.topics.requests, submit('original'))
+    fixture.host.status('session-original', 'running')
     fixture.host.event('session-original', {
       seq: 1,
       type: 'turn/end',
@@ -480,6 +519,7 @@ describe('MqttAgentGateway', () => {
   it('turns agent errors and non-completed outcomes into failed results', async () => {
     const fixture = await setup()
     await inbound(fixture, fixture.gateway.topics.requests, submit('failure'))
+    fixture.host.status('session-failure', 'running')
     fixture.host.error('session-failure', new Error('provider unavailable'))
     fixture.host.event('session-failure', {
       seq: 4,
@@ -497,6 +537,7 @@ describe('MqttAgentGateway', () => {
   it('maps a blocked turn without an operational error to a stable result code', async () => {
     const fixture = await setup()
     await inbound(fixture, fixture.gateway.topics.requests, submit('blocked'))
+    fixture.host.status('session-blocked', 'running')
     fixture.host.event('session-blocked', {
       seq: 4,
       type: 'turn/end',
@@ -551,12 +592,20 @@ describe('MqttAgentGateway', () => {
     await expect(fixture.gateway.stop()).resolves.toBeUndefined()
   })
 
+  it('warns at startup when controller approval is off, and stays quiet when it is on', async () => {
+    const open = await setup()
+    expect(open.logger.warnings.flat()).toContainEqual(expect.stringContaining('controller approval is off'))
+
+    const guarded = await setup({ requireControllerAuth: true })
+    expect(guarded.logger.warnings).toEqual([])
+  })
+
   it('logs invalid uncorrelated JSON without publishing to an unsafe topic', async () => {
     const fixture = await setup()
     const before = fixture.transport.publications.length
     await inbound(fixture, fixture.gateway.topics.requests, '{')
     expect(fixture.transport.publications).toHaveLength(before)
-    expect(fixture.logger.warnings).toHaveLength(1)
+    expect(fixture.logger.warnings.flat()).toContainEqual(expect.stringContaining('rejected uncorrelated message'))
   })
 
   it('pushes status, event, and result notices to management subscribers', async () => {

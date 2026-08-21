@@ -172,7 +172,7 @@ export const Config: Schema<Config> = Schema.intersect([
     maxMetadataBytes: Schema.number().default(8_192)
       .description('Cap on the metadata object carried by a request. Must not exceed maxMessageBytes.'),
     maxInputChars: Schema.number().default(32_768)
-      .description('Cap on the prompt text of a single request or control command.'),
+      .description('Cap on the prompt text of a single request or control command. Must not exceed maxMessageBytes.'),
     maxActiveRequests: Schema.number().default(16)
       .description('How many requests may run at once. Further requests are rejected as retryable.'),
     dedupTtlSeconds: Schema.number().default(604_800)
@@ -193,7 +193,7 @@ export const Config: Schema<Config> = Schema.intersect([
     managementTokenEnv: Schema.string()
       .description('Environment variable holding the management token.'),
     requireControllerAuth: Schema.boolean().default(false)
-      .description('Require controllers to be invited and approved before they may submit or steer.'),
+      .description('Require controllers to be invited and approved before they may submit or steer. Leave this off only on a broker you fully trust: without it, broker credentials alone are enough to run agent work here.'),
   }).description('Management interface'),
 ]) as Schema<Config>
 
@@ -313,6 +313,12 @@ export function resolveConfig(config: Config, env: NodeJS.ProcessEnv = process.e
   if (maxMetadataBytes > maxMessageBytes) {
     throw new Error('dsh-mqtt: maxMetadataBytes must not exceed maxMessageBytes')
   }
+  // A character costs at least one byte, and the size check runs first, so an
+  // input cap above the message cap can never be the limit that rejects.
+  const maxInputChars = positiveInteger(config.maxInputChars ?? 32_768, 'maxInputChars')
+  if (maxInputChars > maxMessageBytes) {
+    throw new Error('dsh-mqtt: maxInputChars must not exceed maxMessageBytes')
+  }
   const dedupTtlSeconds = positiveInteger(config.dedupTtlSeconds ?? 604_800, 'dedupTtlSeconds', Math.floor(MAX_TIMER_MILLIS / 1_000))
   const heartbeatSeconds = positiveInteger(config.heartbeatSeconds ?? 15, 'heartbeatSeconds', Math.floor(MAX_TIMER_MILLIS / 1_000))
   const managementPort = nonNegativeInteger(config.managementPort ?? 3210, 'managementPort', 65_535)
@@ -361,7 +367,7 @@ export function resolveConfig(config: Config, env: NodeJS.ProcessEnv = process.e
     limits: {
       maxMessageBytes,
       maxMetadataBytes,
-      maxInputChars: positiveInteger(config.maxInputChars ?? 32_768, 'maxInputChars'),
+      maxInputChars,
       maxActiveRequests: positiveInteger(config.maxActiveRequests ?? 16, 'maxActiveRequests'),
       dedupTtlMs: dedupTtlSeconds * 1_000,
     },
