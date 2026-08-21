@@ -5,6 +5,7 @@ import { dirname, extname, isAbsolute, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { ResolvedConfig } from './config.ts'
 import type { MqttAgentGateway } from './gateway.ts'
+import { NotFoundError } from './state-store.ts'
 import type { Logger } from './transport.ts'
 
 interface ManagementServerOptions {
@@ -41,12 +42,15 @@ class ManagementHttpError extends Error {
   }
 }
 
-/** Client errors declare their own status; everything else is ours to own. */
+/**
+ * Client errors declare their own status; everything else is ours to own.
+ *
+ * An explicit pair rather than a `status` duck-type, so only errors written to
+ * be read by a client can carry their message out of `handle`.
+ */
 function httpStatus(error: unknown): number {
-  if (error !== null && typeof error === 'object' && 'status' in error && typeof error.status === 'number') {
-    return error.status
-  }
-  return 500
+  if (error instanceof ManagementHttpError) return error.status
+  return error instanceof NotFoundError ? error.status : 500
 }
 
 async function readJson(request: IncomingMessage): Promise<Record<string, unknown>> {
@@ -259,13 +263,10 @@ export class ManagementServer {
       writeJson(response, 403, { error: 'origin not allowed' }, origin)
       return
     }
-    // The stream authenticates by ticket, because EventSource cannot send headers.
+    // The stream accepts a ticket because EventSource cannot send headers. A
+    // client that *can* send one still authenticates the ordinary way.
     if (request.method === 'GET' && url.pathname === '/api/stream') {
-      const ticket = url.searchParams.get('ticket')
-      const allowed = config.managementToken === undefined
-        ? authAllowed(request, config.managementToken)
-        : this.redeemTicket(ticket)
-      if (!allowed) {
+      if (!authAllowed(request, config.managementToken) && !this.redeemTicket(url.searchParams.get('ticket'))) {
         writeJson(response, 401, { error: 'management authorization required' }, origin)
         return
       }

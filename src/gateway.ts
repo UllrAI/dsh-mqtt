@@ -86,7 +86,8 @@ interface ActiveRequest {
    *
    * A session can emit `idle` before it picks up our input — on resume it is
    * idle by definition. Finalizing on that would report a completed request
-   * that never ran, so the first `idle` is only terminal once we saw `running`.
+   * that never ran, so a bare first `idle` is only terminal once we saw
+   * `running`; an `idle` carrying an error or a turn-end reason always is.
    */
   started: boolean
 }
@@ -585,7 +586,10 @@ export class MqttAgentGateway {
       active.started = true
       return
     }
-    if (!active.started) return
+    // A resume-idle is the one status with nothing behind it: no run, no error,
+    // no turn-end reason. Anything else is a turn we owe a result for, and
+    // dropping it would strand the request in `active` for the node's lifetime.
+    if (!active.started && active.lastError === undefined && active.turnEndReason === undefined) return
 
     const kind = reasonKind(active.turnEndReason)
     let result: GatewayResult

@@ -419,9 +419,8 @@ export class RequestStore {
   /**
    * Whether this gateway created the session.
    *
-   * Derived from the request ledger rather than a parallel list, so a session
-   * stops being ours exactly when its request is pruned — and a session id that
-   * only ever arrived on a result is still recognised.
+   * Reads the ledger, which is why a session id that only ever arrived on a
+   * result is still recognised: `finish` records it as readily as activation.
    */
   async hasSession(sessionId: string): Promise<boolean> {
     return this.read(() => this.state.sessions.has(sessionId))

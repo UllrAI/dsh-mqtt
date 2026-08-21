@@ -551,6 +551,29 @@ describe('MqttAgentGateway', () => {
     })
   })
 
+  it('ignores a bare resume idle, but still finalizes one that carries a failure', async () => {
+    const fixture = await setup()
+
+    // A resumed session is idle before it picks up our input. Finalizing there
+    // would report a request that never ran as complete.
+    await inbound(fixture, fixture.gateway.topics.requests, submit('resumed'))
+    fixture.host.status('session-resumed', 'idle')
+    await fixture.gateway.whenIdle()
+    expect(lastResult(fixture, 'resumed')).toBeUndefined()
+    expect((await fixture.gateway.getStatus()).active_requests).toBe(1)
+
+    // An error before the first `running` is still a turn we owe a result for;
+    // dropping it would hold the capacity slot for the node's lifetime.
+    fixture.host.error('session-resumed', new Error('provider unavailable'))
+    fixture.host.status('session-resumed', 'idle')
+    await fixture.gateway.whenIdle()
+    expect(lastResult(fixture, 'resumed')).toMatchObject({
+      status: 'failed',
+      error: { code: 'AGENT_ERROR', message: 'provider unavailable' },
+    })
+    expect((await fixture.gateway.getStatus()).active_requests).toBe(0)
+  })
+
   it('recovers interrupted records once and republishes their result', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dsh-mqtt-gateway-recovery-'))
     directories.push(directory)

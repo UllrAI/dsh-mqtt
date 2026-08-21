@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { resolveConfig } from '../src/config.ts'
 import type { MqttAgentGateway } from '../src/gateway.ts'
 import { ManagementServer } from '../src/management-server.ts'
+import { NotFoundError } from '../src/state-store.ts'
 import type { Logger } from '../src/transport.ts'
 
 const servers: ManagementServer[] = []
@@ -143,6 +144,39 @@ describe('ManagementServer', () => {
     expect((await fetch(`http://127.0.0.1:${port}/api/requests/req-1/cancel`, { method: 'POST' })).status).toBe(415)
   })
 
+  it('answers 404 for an unknown controller, and hides what it cannot name', async () => {
+    const port = await freePort()
+    const config = resolveConfig({
+      url: 'mqtt://broker.test:1883',
+      namespace: 'test',
+      nodeId: 'worker',
+      managementPort: port,
+    })
+    const gateway = {
+      authorizeController: vi.fn(() => Promise.reject(new NotFoundError('unknown controller c1'))),
+      listControllers: vi.fn(() => Promise.reject(new Error('/var/lib/dsh/state.json is corrupt'))),
+    } as unknown as MqttAgentGateway
+    const log = logger()
+    const server = new ManagementServer({ gateway, config, logger: log })
+    servers.push(server)
+    await server.start()
+    const base = `http://127.0.0.1:${port}/api`
+
+    const missing = await fetch(`${base}/controllers/c1/authorize`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+    })
+    expect(missing.status).toBe(404)
+    expect(await missing.json()).toEqual({ error: 'unknown controller c1' })
+
+    // Anything we did not write for a client could describe the disk or the
+    // broker: generic on the wire, intact in the operator's log.
+    const broken = await fetch(`${base}/controllers`)
+    expect(broken.status).toBe(500)
+    expect(await broken.json()).toEqual({ error: 'internal error' })
+    expect(vi.mocked(log.error).mock.calls[0]?.[1]).toMatchObject({ message: '/var/lib/dsh/state.json is corrupt' })
+  })
+
   it('issues a single-use stream ticket that EventSource can spend once', async () => {
     const port = await freePort()
     const config = resolveConfig({
@@ -174,6 +208,12 @@ describe('ManagementServer', () => {
     // Spent: a replayed query string buys nothing.
     expect((await fetch(`${base}/stream?ticket=${ticket}`)).status).toBe(401)
     expect((await fetch(`${base}/stream?ticket=forged`)).status).toBe(401)
+
+    // Tickets exist for EventSource. A client that can send a header still may,
+    // and spends no ticket doing it.
+    const direct = await fetch(`${base}/stream`, { headers: { authorization: 'Bearer management-secret' } })
+    expect(direct.status).toBe(200)
+    await direct.body?.cancel()
   })
 
   it('requires a bearer token when management authentication is configured', async () => {
