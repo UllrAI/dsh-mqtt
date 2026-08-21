@@ -7,7 +7,10 @@
  *   `__ModuleLoader__` registry rather than as an ES module, so the CJS output
  *   is wrapped in the loader's lazy factory and `react`, `react/jsx-runtime`
  *   and the UI primitives resolve from the shell's own seeded modules. Nothing
- *   in the factory runs until the shell decides to load the plugin.
+ *   in the factory runs until the shell decides to load the plugin. publint
+ *   warns that the `./client` export is CJS read as ESM; that is a Node-only
+ *   heuristic misreading the convention every `@deepseek-ai/dsh-client-*`
+ *   package ships, and renaming the file would break the shell's resolution.
  * - `lib/standalone/` — the standalone page, built by Vite (see
  *   `vite.client.config.ts`), which does bundle React.
  */

@@ -21,6 +21,8 @@ import type { GatewayTransport, IncomingMessage, Logger, TransportState } from '
 import { GATEWAY_VERSION } from './version.ts'
 
 const SUMMARY_LIMIT = 8_000
+/** Chain key for work that is not tied to one session; see `enqueue`. */
+const SHARED_CHAIN = '@shared'
 
 export type NodeState = 'starting' | 'connecting' | 'ready' | 'busy' | 'degraded' | 'offline' | 'stopped'
 
@@ -50,6 +52,28 @@ export interface NodeStatus {
   health: NodeHealthCheck[]
 }
 
+/**
+ * One history row as the management UI sees it.
+ *
+ * Deliberately narrower than `StoredRequest`: no fingerprint, no control-dedup
+ * table. Mirrors `RequestRecord` in the client.
+ */
+export interface RequestSummary {
+  id: string
+  status: StoredRequest['status']
+  createdAt: number
+  updatedAt: number
+  sessionId?: string
+  workspace?: string
+  controllerId?: string
+  cancelRequested?: boolean
+  result?: {
+    status: string
+    summary?: string
+    error?: { code: string; message: string }
+  }
+}
+
 interface ActiveRequest {
   id: string
   sessionId: string
@@ -57,6 +81,15 @@ interface ActiveRequest {
   turnEndReason?: unknown
   lastError?: string
   cancelRequested: boolean
+  /**
+   * Whether the agent has reported `running` for this request yet.
+   *
+   * A session can emit `idle` before it picks up our input — on resume it is
+   * idle by definition. Finalizing on that would report a completed request
+   * that never ran, so a bare first `idle` is only terminal once we saw
+   * `running`; an `idle` carrying an error or a turn-end reason always is.
+   */
+  started: boolean
 }
 
 /**
@@ -82,6 +115,26 @@ function reasonKind(reason: unknown): string | undefined {
   return typeof kind === 'string' ? kind : undefined
 }
 
+/**
+ * Turn-end kinds the agent reports, mapped to protocol error codes.
+ *
+ * An explicit table rather than string mutation: the wire codes are part of the
+ * protocol, so a new agent-side kind should fall back to `TURN_FAILED` instead
+ * of silently inventing a code no controller knows how to handle.
+ */
+const TURN_END_CODES: Record<string, string> = {
+  aborted: 'TURN_ABORTED',
+  'max-turns': 'TURN_MAX_TURNS',
+  'max-tokens': 'TURN_MAX_TOKENS',
+  error: 'TURN_ERROR',
+  refusal: 'TURN_REFUSAL',
+  blocked: 'TURN_BLOCKED',
+}
+
+function turnEndCode(kind: string | undefined): string {
+  return (kind === undefined ? undefined : TURN_END_CODES[kind]) ?? 'TURN_FAILED'
+}
+
 function trimSummary(value: string): string {
   return value.length <= SUMMARY_LIMIT ? value : `${value.slice(0, SUMMARY_LIMIT - 1)}…`
 }
@@ -94,7 +147,8 @@ export class MqttAgentGateway {
   readonly topics: TopicLayout
   private readonly active = new Map<string, ActiveRequest>()
   private readonly requestBySession = new Map<string, string>()
-  private operationQueue: Promise<void> = Promise.resolve()
+  /** Serialization chains, keyed by session; `SHARED_CHAIN` holds the rest. */
+  private readonly chains = new Map<string, Promise<void>>()
   private stopping = false
   private connectionState: TransportState = 'offline'
   private nodeState: NodeState = 'starting'
@@ -119,9 +173,9 @@ export class MqttAgentGateway {
     }))
 
     this.host.start({
-      onEvent: event => { void this.enqueue(() => this.handleAgentEvent(event.sessionId, event.event)) },
-      onStatus: event => { void this.enqueue(() => this.handleAgentStatus(event)) },
-      onError: event => { void this.enqueue(() => this.handleAgentError(event)) },
+      onEvent: event => { void this.enqueue(() => this.handleAgentEvent(event.sessionId, event.event), event.sessionId) },
+      onStatus: event => { void this.enqueue(() => this.handleAgentStatus(event), event.sessionId) },
+      onError: event => { void this.enqueue(() => this.handleAgentError(event), event.sessionId) },
     })
 
     try {
@@ -154,6 +208,15 @@ export class MqttAgentGateway {
       void this.enqueue(() => this.publishOnlineStatus())
     }, this.config.heartbeatSeconds * 1_000)
     this.logger.info(`dsh-mqtt: gateway started at ${this.topics.base}`)
+    // Broker credentials alone decide who may drive an agent that reads files and
+    // runs commands. That is a fine default for a private broker and a bad one
+    // everywhere else, so it should never be a silent default.
+    if (!this.config.requireControllerAuth) {
+      this.logger.warn(
+        'dsh-mqtt: controller approval is off, so anyone who can publish to this broker can run agent work here.'
+        + ' Set requireControllerAuth: true unless the broker is fully trusted.',
+      )
+    }
   }
 
   async stop(): Promise<void> {
@@ -183,8 +246,14 @@ export class MqttAgentGateway {
     if (failures.length > 1) throw new AggregateError(failures, 'dsh-mqtt gateway shutdown failed')
   }
 
+  /**
+   * Settle every chain.
+   *
+   * A draining chain can enqueue more work, so this loops until no chain is
+   * left rather than awaiting one snapshot.
+   */
   async whenIdle(): Promise<void> {
-    await this.operationQueue
+    while (this.chains.size > 0) await Promise.all(this.chains.values())
   }
 
   /**
@@ -213,8 +282,34 @@ export class MqttAgentGateway {
     return this.buildStatus()
   }
 
-  async listRequests(limit = 100): Promise<StoredRequest[]> {
-    return this.store.list({ limit })
+  /**
+   * History for the management UI.
+   *
+   * Projected rather than returned raw: the stored record also holds the request
+   * fingerprint and the control-dedup table, neither of which the UI needs and
+   * both of which describe payloads we should not hand back out.
+   */
+  async listRequests(limit = 100): Promise<RequestSummary[]> {
+    const records = await this.store.list({ limit })
+    return records.map(record => ({
+      id: record.id,
+      status: record.status,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+      ...record.sessionId === undefined ? {} : { sessionId: record.sessionId },
+      ...record.workspace === undefined ? {} : { workspace: record.workspace },
+      ...record.controllerId === undefined ? {} : { controllerId: record.controllerId },
+      ...this.active.get(record.id)?.cancelRequested === true ? { cancelRequested: true } : {},
+      ...record.result === undefined ? {} : {
+        result: {
+          status: record.result.status,
+          ...record.result.summary === undefined ? {} : { summary: record.result.summary },
+          ...record.result.error === null ? {} : {
+            error: { code: record.result.error.code, message: record.result.error.message },
+          },
+        },
+      },
+    }))
   }
 
   async listControllers(): Promise<ControllerSummary[]> {
@@ -233,12 +328,55 @@ export class MqttAgentGateway {
     return this.store.revokeController(id)
   }
 
-  private enqueue(operation: () => void | Promise<void>): Promise<void> {
-    const task = this.operationQueue.then(operation)
-    this.operationQueue = task.catch(error => {
+  /**
+   * Cancel a running request from the management UI.
+   *
+   * Goes through the same queue as an MQTT `request.cancel` so the operator and
+   * a controller cannot race, and emits the same events — a controller watching
+   * the request sees an operator cancel exactly as it would see its own.
+   */
+  async cancelRequest(id: string): Promise<{ ok: boolean; reason?: 'not-found' | 'not-active' }> {
+    let outcome: { ok: boolean; reason?: 'not-found' | 'not-active' } = { ok: true }
+    let failure: unknown
+    await this.enqueue(async () => {
+      try {
+        const active = this.active.get(id)
+        if (active === undefined) {
+          outcome = { ok: false, reason: await this.store.get(id) === undefined ? 'not-found' : 'not-active' }
+          return
+        }
+        if (active.cancelRequested) return
+        this.applyControl(active, { type: 'request.cancel' })
+        await this.publishEvent(id, 'request.control.accepted', { action: 'request.cancel', source: 'management' })
+        await this.publishOnlineStatus()
+      } catch (error) {
+        failure = error
+      }
+    })
+    if (failure !== undefined) throw failure
+    return outcome
+  }
+
+  /**
+   * Serialize gateway work, per chain.
+   *
+   * Broker publishes are QoS 1 awaits, so one shared chain lets a slow ack for
+   * one session stall every other session's events. Work for a session goes on
+   * its own chain — ordering within a session still holds, which is what
+   * consumers rely on — while unkeyed work (submits, control, status) stays on
+   * the shared chain, where mutual exclusion over `active` is load-bearing.
+   */
+  private enqueue(operation: () => void | Promise<void>, key = SHARED_CHAIN): Promise<void> {
+    const chain = (this.chains.get(key) ?? Promise.resolve()).then(operation).catch(error => {
       this.logger.error('dsh-mqtt: asynchronous gateway operation failed', error)
     })
-    return this.operationQueue
+    this.chains.set(key, chain)
+    // Drop a drained chain, so long-lived gateways do not accumulate one settled
+    // promise per session ever seen, and `whenIdle` has an empty map to observe.
+    void chain.then(() => {
+      if (this.chains.get(key) === chain) this.chains.delete(key)
+    })
+    return chain
   }
 
   private async handleMessage(message: IncomingMessage): Promise<void> {
@@ -272,7 +410,10 @@ export class MqttAgentGateway {
       return
     }
 
-    const reservation = await this.store.reserve(request.id, fingerprint(request))
+    const reservation = await this.store.reserve(request.id, fingerprint(request), {
+      ...request.workspace === undefined ? {} : { workspace: request.workspace },
+      ...request.controller_id === undefined ? {} : { controllerId: request.controller_id },
+    })
     if (reservation.kind === 'conflict') {
       await this.publishResult(protocolResult(request.id, 'failed', {
         error: gatewayError('REQUEST_ID_CONFLICT', 'request id was already used with a different payload'),
@@ -323,6 +464,7 @@ export class MqttAgentGateway {
         id: request.id,
         sessionId: lease.sessionId,
         cancelRequested: false,
+        started: false,
       }
       this.active.set(request.id, active)
       this.requestBySession.set(lease.sessionId, request.id)
@@ -393,6 +535,8 @@ export class MqttAgentGateway {
 
     const active = this.active.get(requestId)
     if (active === undefined) {
+      // Retryable, so the command id must not stay consumed by the dedup table.
+      await this.store.releaseControl(requestId, control.command_id)
       await this.publishEvent(requestId, 'request.control.rejected', {
         command_id: control.command_id,
         error: gatewayError('REQUEST_NOT_ACTIVE', 'request is not active', true),
@@ -400,23 +544,28 @@ export class MqttAgentGateway {
       return
     }
     try {
-      if (control.type === 'request.cancel') {
-        active.cancelRequested = true
-        this.host.cancel(active.sessionId)
-      } else {
-        this.host.send(active.sessionId, control.type === 'request.steer' ? 'steer' : 'inject', control.input as string)
-      }
+      this.applyControl(active, control)
       await this.publishEvent(requestId, 'request.control.accepted', {
         command_id: control.command_id,
         action: control.type,
       })
       await this.publishOnlineStatus()
     } catch (error) {
+      await this.store.releaseControl(requestId, control.command_id)
       await this.publishEvent(requestId, 'request.control.failed', {
         command_id: control.command_id,
         error: gatewayError('CONTROL_FAILED', errorMessage(error), true),
       })
     }
+  }
+
+  private applyControl(active: ActiveRequest, control: Pick<ControlRequest, 'type' | 'input'>): void {
+    if (control.type === 'request.cancel') {
+      active.cancelRequested = true
+      this.host.cancel(active.sessionId)
+      return
+    }
+    this.host.send(active.sessionId, control.type === 'request.steer' ? 'steer' : 'inject', control.input as string)
   }
 
   private async handleAgentEvent(sessionId: string, event: unknown): Promise<void> {
@@ -433,7 +582,14 @@ export class MqttAgentGateway {
     const active = this.activeForSession(event.sessionId)
     if (active === undefined) return
     await this.publishEvent(active.id, 'agent.status', { status: event.status })
-    if (event.status !== 'idle') return
+    if (event.status === 'running') {
+      active.started = true
+      return
+    }
+    // A resume-idle is the one status with nothing behind it: no run, no error,
+    // no turn-end reason. Anything else is a turn we owe a result for, and
+    // dropping it would strand the request in `active` for the node's lifetime.
+    if (!active.started && active.lastError === undefined && active.turnEndReason === undefined) return
 
     const kind = reasonKind(active.turnEndReason)
     let result: GatewayResult
@@ -447,7 +603,7 @@ export class MqttAgentGateway {
         sessionId: active.sessionId,
         ...active.summary === undefined ? {} : { summary: active.summary },
         error: gatewayError(
-          active.lastError === undefined ? `TURN_${kind?.toUpperCase().replaceAll('-', '_') ?? 'FAILED'}` : 'AGENT_ERROR',
+          active.lastError === undefined ? turnEndCode(kind) : 'AGENT_ERROR',
           active.lastError ?? `agent turn ended with ${kind}`,
         ),
       })
@@ -471,7 +627,15 @@ export class MqttAgentGateway {
     })
   }
 
+  /**
+   * The request an agent session belongs to, or `undefined` once stopping.
+   *
+   * Session work runs on its own chain, so without the stopping guard a late
+   * agent event could publish after `stop()` has already written the terminal
+   * result for that request.
+   */
   private activeForSession(sessionId: string): ActiveRequest | undefined {
+    if (this.stopping) return undefined
     const requestId = this.requestBySession.get(sessionId)
     return requestId === undefined ? undefined : this.active.get(requestId)
   }
@@ -571,7 +735,6 @@ export class MqttAgentGateway {
     const health: NodeHealthCheck[] = [{
       name: 'broker',
       status: this.connectionState === 'connected' ? 'ready' : this.connectionState === 'offline' ? 'offline' : 'degraded',
-      ...this.connectionState === 'connected' ? {} : { message: `broker is ${this.connectionState}` },
     }]
     let hostHealth: AgentHostHealth
     try {
@@ -623,16 +786,37 @@ export class MqttAgentGateway {
   }
 }
 
+/**
+ * The Last Will payload, published by the broker if this node drops.
+ *
+ * MQTT fixes the will at CONNECT, so every value here is frozen at session
+ * setup: `timestamp` and `heartbeat_at` mark when the will was armed, not when
+ * the node died, and `expires_at` is already in the past by the time a broker
+ * delivers this. Treat the message as "the session is gone" rather than as a
+ * timeline. Same field set as a live status so a controller can decode both
+ * with one parser; the counters read zero because a dead node is running
+ * nothing, and `workspaces` is empty because a dead node cannot vouch for what
+ * is still readable on disk.
+ */
 export function offlineStatus(config: ResolvedConfig): string {
+  const armedAt = new Date().toISOString()
   return json({
     version: 1,
     type: 'node.status',
-    timestamp: new Date().toISOString(),
+    timestamp: armedAt,
+    heartbeat_at: armedAt,
+    expires_at: armedAt,
     node_id: config.nodeId,
     display_name: config.displayName,
     state: 'offline',
     online: false,
     gateway_version: GATEWAY_VERSION,
     protocol_version: 1,
+    capabilities: config.capabilities,
+    workspaces: [],
+    active_requests: 0,
+    request_capacity: config.limits.maxActiveRequests,
+    controller_auth_required: config.requireControllerAuth,
+    health: [{ name: 'broker', status: 'offline' }],
   })
 }

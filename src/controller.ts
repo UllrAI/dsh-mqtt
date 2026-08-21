@@ -30,6 +30,13 @@ export interface SubmitOptions {
   metadata?: Record<string, unknown>
 }
 
+/**
+ * Results that arrive before anyone waits for them are kept so a caller can
+ * still claim them, but only this many: an unbounded map would grow for the
+ * lifetime of a long-lived controller that never calls `waitForResult`.
+ */
+const MAX_UNCLAIMED_RESULTS = 128
+
 export class MqttControllerClient {
   readonly topics: TopicLayout
   private client: MqttClient | undefined
@@ -37,6 +44,7 @@ export class MqttControllerClient {
   private readonly results = new Map<string, GatewayResult>()
   private readonly eventListeners = new Set<(event: GatewayEvent) => void>()
   private readonly statusListeners = new Set<(status: NodeStatus) => void>()
+  private readonly errorListeners = new Set<(error: Error) => void>()
 
   constructor(private readonly config: ControllerInviteConfig) {
     this.topics = new TopicLayout(config.namespace, config.nodeId)
@@ -61,10 +69,15 @@ export class MqttControllerClient {
     const client = connect(this.config.url, options)
     this.client = client
     client.on('message', (topic, payload) => this.handleMessage(topic, payload))
+    // mqtt.js reconnects on its own, but an unhandled 'error' event throws. This
+    // listener is permanent so a broker hiccup after connect cannot kill the host.
+    client.on('error', error => {
+      for (const listener of this.errorListeners) listener(error)
+    })
     try {
       await new Promise<void>((resolve, reject) => {
         const onConnect = (): void => {
-          client.off('error', onError)
+          this.errorListeners.delete(onError)
           resolve()
         }
         const onError = (error: Error): void => {
@@ -72,7 +85,7 @@ export class MqttControllerClient {
           reject(error)
         }
         client.once('connect', onConnect)
-        client.once('error', onError)
+        this.errorListeners.add(onError)
       })
       await client.subscribeAsync({
         [this.topics.status]: { qos: 1 },
@@ -81,6 +94,7 @@ export class MqttControllerClient {
       })
     } catch (error) {
       this.client = undefined
+      this.errorListeners.clear()
       await client.endAsync(true).catch(() => undefined)
       throw error
     }
@@ -91,6 +105,16 @@ export class MqttControllerClient {
     if (client === undefined) return
     this.client = undefined
     await client.endAsync(true)
+  }
+
+  /**
+   * Broker errors after a successful connect. Without a subscriber they are
+   * swallowed rather than thrown, which is the safe default for an embedded
+   * client that reconnects by itself.
+   */
+  onError(listener: (error: Error) => void): () => void {
+    this.errorListeners.add(listener)
+    return () => this.errorListeners.delete(listener)
   }
 
   onStatus(listener: (status: NodeStatus) => void): () => void {
@@ -144,8 +168,9 @@ export class MqttControllerClient {
         return
       }
       const timer = setTimeout(() => {
-        const waiters = this.resultWaiters.get(requestId) ?? []
-        this.resultWaiters.set(requestId, waiters.filter(waiter => waiter !== finish))
+        const remaining = (this.resultWaiters.get(requestId) ?? []).filter(waiter => waiter !== finish)
+        if (remaining.length === 0) this.resultWaiters.delete(requestId)
+        else this.resultWaiters.set(requestId, remaining)
         reject(new Error(`timed out waiting for request ${requestId}`))
       }, timeoutMs)
       const finish = (result: GatewayResult): void => {
@@ -175,18 +200,29 @@ export class MqttControllerClient {
       for (const listener of this.statusListeners) listener(value as NodeStatus)
       return
     }
-    const resultMatch = new RegExp(`^${this.topics.base.replaceAll('/', '\\/')}\\/requests\\/([^/]+)\\/result$`).exec(topic)
-    if (resultMatch !== null && value !== null && typeof value === 'object') {
-      const waiters = this.resultWaiters.get(resultMatch[1] as string)
-      const result = value as GatewayResult
-      if (waiters === undefined || waiters.length === 0) this.results.set(resultMatch[1] as string, result)
-      for (const waiter of waiters ?? []) waiter(result)
-      this.resultWaiters.delete(resultMatch[1] as string)
+    if (value === null || typeof value !== 'object') return
+
+    const resultId = this.topics.requestIdFromResult(topic)
+    if (resultId !== undefined) {
+      const waiters = this.resultWaiters.get(resultId)
+      this.resultWaiters.delete(resultId)
+      if (waiters === undefined || waiters.length === 0) this.rememberResult(resultId, value as GatewayResult)
+      else for (const waiter of waiters) waiter(value as GatewayResult)
       return
     }
-    const eventMatch = new RegExp(`^${this.topics.base.replaceAll('/', '\\/')}\\/requests\\/([^/]+)\\/events$`).exec(topic)
-    if (eventMatch !== null && value !== null && typeof value === 'object') {
+
+    if (this.topics.requestIdFromEvents(topic) !== undefined) {
       for (const listener of this.eventListeners) listener(value as GatewayEvent)
+    }
+  }
+
+  /** Keep the newest results, evicting in insertion order once the cache is full. */
+  private rememberResult(requestId: string, result: GatewayResult): void {
+    this.results.delete(requestId)
+    this.results.set(requestId, result)
+    for (const stale of this.results.keys()) {
+      if (this.results.size <= MAX_UNCLAIMED_RESULTS) break
+      this.results.delete(stale)
     }
   }
 }

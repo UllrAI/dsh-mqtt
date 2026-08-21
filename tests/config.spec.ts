@@ -36,6 +36,7 @@ describe('resolveConfig', () => {
     [{ url: 'https://broker.example.com', namespace: 'a', nodeId: 'b' }, /url protocol/],
     [{ url: 'mqtt://localhost', namespace: 'bad/#', nodeId: 'b' }, /namespace/],
     [{ url: 'mqtt://localhost', namespace: 'a', nodeId: 'b', maxMessageBytes: 10, maxMetadataBytes: 11 }, /maxMetadataBytes/],
+    [{ url: 'mqtt://localhost', namespace: 'a', nodeId: 'b', maxMessageBytes: 10, maxMetadataBytes: 10, maxInputChars: 11 }, /maxInputChars/],
     [{ url: 'mqtt://localhost', namespace: 'a', nodeId: 'b', workspaces: {}, defaultWorkspace: 'missing' }, /defaultWorkspace/],
     [{ url: 'mqtt://localhost', namespace: 'a', nodeId: 'b', reconnectPeriodMs: -1 }, /reconnectPeriodMs/],
     [{ url: 'mqtt://localhost', namespace: 'a', nodeId: 'b', managementPort: 3210, managementHost: '0.0.0.0' }, /managementToken/],

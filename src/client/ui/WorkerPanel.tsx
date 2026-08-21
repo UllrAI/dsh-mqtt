@@ -8,18 +8,22 @@
 
 import { useCallback, useState, type ReactNode } from 'react'
 import { Button, Input, Modal, StateDot, Toast, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { Controller, ControllerInvite, ManagementClient } from '../core/api.ts'
+import { isRequestActive, type Controller, type ControllerInvite, type ManagementClient, type RequestRecord } from '../core/api.ts'
 import type { Translate } from '../core/i18n.ts'
 import {
+  controllerName,
   formatClock,
+  formatDuration,
   formatTime,
+  healthDetail,
+  healthLabel,
   healthTone,
   inviteConfigText,
   nodeStateLabel,
   nodeStateTone,
-  readyWorkspaceCount,
   requestStatusLabel,
   requestStatusTone,
+  workspaceReadiness,
 } from '../core/format.ts'
 import { useManagementStore } from './useManagementStore.ts'
 import { Field, Row, Section } from './parts.tsx'
@@ -39,36 +43,44 @@ export interface WorkerPanelProps {
   headerAction?: ReactNode
 }
 
-type DialogKind = 'invite' | 'connection' | { controller: Controller }
+type DialogKind = 'invite' | 'connection' | { controller: Controller } | { request: RequestRecord }
 
 export function WorkerPanel({ client, t, locale, onToken, headerAction }: WorkerPanelProps): JSX.Element {
   const { state, store } = useManagementStore(client)
   const [dialog, setDialog] = useState<DialogKind>()
   const [toast, setToast] = useState<{ text: string; seq: number }>()
-  const [busy, setBusy] = useState(false)
+  const [pendingAction, setPendingAction] = useState<string>()
   const [tokenInput, setTokenInput] = useState('')
   const [inviteName, setInviteName] = useState('')
   const [invite, setInvite] = useState<ControllerInvite>()
+  const [inviteApproved, setInviteApproved] = useState(false)
 
   const notify = useCallback((text: string) => {
     setToast(previous => ({ text, seq: (previous?.seq ?? 0) + 1 }))
   }, [])
 
-  const run = useCallback(async (action: () => Promise<void>, success?: string) => {
-    setBusy(true)
+  /**
+   * One action at a time, but only the invoked control shows it. `key` identifies
+   * the control so a row's own button reports progress instead of the whole panel
+   * greying out.
+   */
+  const run = useCallback(async (key: string, action: () => Promise<void>, success?: string) => {
+    setPendingAction(key)
     try {
       await action()
       if (success !== undefined) notify(success)
     } catch (error) {
       notify(error instanceof Error ? error.message : String(error))
     } finally {
-      setBusy(false)
+      setPendingAction(undefined)
     }
   }, [notify])
 
   const { status, config, controllers, requests } = state
   const authorized = controllers.filter(controller => controller.status === 'authorized')
   const pending = controllers.filter(controller => controller.status === 'pending')
+  const revoking = typeof dialog === 'object' && 'controller' in dialog ? dialog.controller : undefined
+  const detail = typeof dialog === 'object' && 'request' in dialog ? dialog.request : undefined
 
   return (
     <div className="dsh-mqtt-panel">
@@ -115,12 +127,13 @@ export function WorkerPanel({ client, t, locale, onToken, headerAction }: Worker
           title={status.display_name}
           action={
             <>
-              <Button variant="primary" size="sm" disabled={busy} onClick={() => {
+              <Button variant="primary" size="sm" onClick={() => {
                 setInviteName('')
                 setInvite(undefined)
+                setInviteApproved(false)
                 setDialog('invite')
               }}>{t('addController')}</Button>
-              <Button variant="outline" size="sm" disabled={busy} onClick={() => void store?.refresh()}>{t('refresh')}</Button>
+              <Button variant="outline" size="sm" onClick={() => void store?.refresh()}>{t('refresh')}</Button>
             </>
           }
         >
@@ -130,12 +143,12 @@ export function WorkerPanel({ client, t, locale, onToken, headerAction }: Worker
           </p>
           <p className="dsh-mqtt-muted">
             {status.online ? t('brokerConnected') : t('brokerDisconnected')}
-            {' · '}{t('workspacesReady', { count: readyWorkspaceCount(status) })}
+            {' · '}{t('workspacesReady', workspaceReadiness(status))}
             {' · '}{t('taskLoad', { active: status.active_requests, capacity: status.request_capacity })}
           </p>
 
           <div className="dsh-mqtt-fields">
-            <Field label={t('lastHeartbeat')} value={formatTime(status.heartbeat_at, locale, t)} />
+            <Field label={t('lastHeartbeat')} value={formatTime(status.heartbeat_at, locale, t('noHeartbeat'))} />
             <Field label={t('capacity')} value={`${status.active_requests} / ${status.request_capacity}`} />
             <Field label={t('gatewayVersion')} value={status.gateway_version} />
           </div>
@@ -145,8 +158,8 @@ export function WorkerPanel({ client, t, locale, onToken, headerAction }: Worker
               {status.health.map(check => (
                 <li key={check.name}>
                   <StateDot state={healthTone(check.status)} size={8} />
-                  <span className="dsh-mqtt-grow">{check.name}</span>
-                  <span className="dsh-mqtt-muted">{check.message ?? check.status}</span>
+                  <span className="dsh-mqtt-grow">{healthLabel(check.name, t)}</span>
+                  <span className="dsh-mqtt-muted">{healthDetail(check, t)}</span>
                 </li>
               ))}
             </ul>
@@ -158,20 +171,24 @@ export function WorkerPanel({ client, t, locale, onToken, headerAction }: Worker
 
       <Section title={t('controllersTitle')} count={authorized.length}>
         {pending.length > 0 && (
-          <ul className="dsh-mqtt-list" aria-label={t('pendingCount', { count: pending.length })}>
+          // The section count covers approved controllers only, so name the
+          // pending rows rather than leaving them to contradict it.
+          <>
+            <p className="dsh-mqtt-subhead" id="dsh-mqtt-pending">{t('pendingCount', { count: pending.length })}</p>
+            <ul className="dsh-mqtt-list" aria-labelledby="dsh-mqtt-pending">
             {pending.map(controller => (
               <Row
                 key={controller.id}
                 title={controller.name}
-                subtitle={`${t('expires')} ${formatTime(controller.expiresAt, locale, t)}`}
+                subtitle={`${t('expires')} ${formatTime(controller.expiresAt, locale, t('noExpiry'))}`}
                 tone="warning"
                 actions={
                   <>
-                    <Button variant="primary" size="sm" disabled={busy} onClick={() => void run(async () => {
+                    <Button variant="primary" size="sm" disabled={pendingAction !== undefined} onClick={() => void run(`approve:${controller.id}`, async () => {
                       await client.authorizeController(controller.id)
                       await store?.refresh()
                     }, t('approved'))}>{t('approve')}</Button>
-                    <Button variant="outline" size="sm" disabled={busy} onClick={() => void run(async () => {
+                    <Button variant="outline" size="sm" disabled={pendingAction !== undefined} onClick={() => void run(`reject:${controller.id}`, async () => {
                       await client.revokeController(controller.id)
                       await store?.refresh()
                     }, t('rejected'))}>{t('reject')}</Button>
@@ -179,7 +196,8 @@ export function WorkerPanel({ client, t, locale, onToken, headerAction }: Worker
                 }
               />
             ))}
-          </ul>
+            </ul>
+          </>
         )}
 
         {authorized.length === 0 && pending.length === 0
@@ -190,10 +208,10 @@ export function WorkerPanel({ client, t, locale, onToken, headerAction }: Worker
                 <Row
                   key={controller.id}
                   title={controller.name}
-                  subtitle={`${controller.scopes.join(' · ')} — ${t('lastUsed')} ${formatTime(controller.lastUsedAt, locale, t)}`}
+                  subtitle={`${controller.scopes.join(' · ')} — ${t('lastUsed')} ${formatTime(controller.lastUsedAt, locale, t('neverUsed'))}`}
                   tone="done"
                   actions={
-                    <Button variant="outline" size="sm" disabled={busy} onClick={() => setDialog({ controller })}>
+                    <Button variant="outline" size="sm" onClick={() => setDialog({ controller })}>
                       {t('revoke')}
                     </Button>
                   }
@@ -211,14 +229,36 @@ export function WorkerPanel({ client, t, locale, onToken, headerAction }: Worker
               {requests.map(record => (
                 <Row
                   key={record.id}
-                  title={record.id}
+                  title={record.result?.summary ?? record.id}
+                  // A failure reason is the one detail worth reading without a
+                  // click; everything else waits in the detail dialog.
                   subtitle={[
                     requestStatusLabel(record.status, t),
-                    formatTime(record.updatedAt, locale, t),
+                    formatTime(record.updatedAt, locale, t('unknownTime')),
                     record.result?.error?.message,
                   ].filter(Boolean).join(' · ')}
                   tone={requestStatusTone(record.status)}
-                  mono
+                  mono={record.result?.summary === undefined}
+                  actions={
+                    <>
+                      <Button variant="ghost" size="sm" onClick={() => setDialog({ request: record })}>
+                        {t('taskDetail')}
+                      </Button>
+                      {isRequestActive(record) && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={pendingAction !== undefined || record.cancelRequested === true}
+                          onClick={() => void run(`cancel:${record.id}`, async () => {
+                            await client.cancelRequest(record.id)
+                            await store?.refresh()
+                          }, t('stopRequested'))}
+                        >
+                          {record.cancelRequested === true ? t('stopping') : t('stop')}
+                        </Button>
+                      )}
+                    </>
+                  }
                 />
               ))}
             </ul>
@@ -236,18 +276,27 @@ export function WorkerPanel({ client, t, locale, onToken, headerAction }: Worker
             <Button variant="ghost" onClick={() => setDialog(undefined)}>{t('cancel')}</Button>
             {invite === undefined
               ? (
-                <Button variant="primary" disabled={busy || inviteName.trim() === ''} onClick={() => void run(async () => {
+                <Button variant="primary" disabled={pendingAction !== undefined || inviteName.trim() === ''} onClick={() => void run('invite:create', async () => {
                   const created = await client.createInvite(inviteName.trim())
                   setInvite(created)
                   await store?.refresh()
                 })}>{t('inviteCreate')}</Button>
               )
               : (
-                <Button variant="primary" onClick={() => void run(async () => {
-                  if (config === undefined) return
-                  const copied = await writeClipboard(inviteConfigText(invite, config))
-                  notify(copied === false ? t('copyFailed') : t('copied'))
-                })}>{t('copy')}</Button>
+                <>
+                  {/* Approving here is the same decision the list would ask for,
+                      made by the same operator who just issued the invite. */}
+                  <Button variant="outline" disabled={pendingAction !== undefined || inviteApproved} onClick={() => void run('invite:approve', async () => {
+                    await client.authorizeController(invite.id)
+                    setInviteApproved(true)
+                    await store?.refresh()
+                  }, t('approved'))}>{inviteApproved ? t('approved') : t('approve')}</Button>
+                  <Button variant="primary" onClick={() => void run('invite:copy', async () => {
+                    if (config === undefined) return
+                    const copied = await writeClipboard(inviteConfigText(invite, config))
+                    notify(copied === false ? t('copyFailed') : t('copied'))
+                  })}>{t('copy')}</Button>
+                </>
               )}
           </>
         }
@@ -287,27 +336,70 @@ export function WorkerPanel({ client, t, locale, onToken, headerAction }: Worker
           <Field label={t('workspaces')} value={config?.workspaces.join(' · ') || t('none')} />
           <Field label={t('controllerAuth')} value={config?.controller_auth_required === true ? t('enabled') : t('disabled')} />
         </div>
+        {config?.controller_auth_required === false && <p className="dsh-mqtt-warning">{t('controllerAuthOffNote')}</p>}
         <p className="dsh-mqtt-muted">{t('privacyNote')}</p>
       </Modal>
 
       <Modal
-        open={typeof dialog === 'object'}
+        open={detail !== undefined}
         onClose={() => setDialog(undefined)}
-        title={t('revoke')}
+        title={t('taskDetail')}
         closeLabel={t('close')}
-        description={typeof dialog === 'object' ? dialog.controller.name : ''}
+        footer={<Button variant="primary" onClick={() => setDialog(undefined)}>{t('done')}</Button>}
+      >
+        {detail !== undefined && (
+          <>
+            <div className="dsh-mqtt-fields">
+              <Field label={t('taskStarted')} value={formatTime(detail.createdAt, locale, t('unknownTime'))} />
+              <Field label={t('taskDuration')} value={formatDuration(detail.updatedAt - detail.createdAt, t)} />
+              <Field label={t('taskWorkspace')} value={detail.workspace ?? '—'} />
+              <Field
+                label={t('taskController')}
+                value={controllerName(detail.controllerId, controllers) ?? t('taskUnknownController')}
+              />
+            </div>
+            {detail.result?.summary !== undefined && (
+              <p className="dsh-mqtt-label">
+                {t('taskSummary')}
+                <span>{detail.result.summary}</span>
+              </p>
+            )}
+            {detail.result?.error !== undefined && (
+              <p className="dsh-mqtt-label">
+                {t('taskError')}
+                <span>{detail.result.error.message}</span>
+              </p>
+            )}
+            <pre className="dsh-mqtt-code">{detail.id}</pre>
+          </>
+        )}
+      </Modal>
+
+      <Modal
+        open={revoking !== undefined}
+        onClose={() => setDialog(undefined)}
+        title={revoking === undefined ? t('revoke') : t('revokeTitle', { name: revoking.name })}
+        closeLabel={t('close')}
+        description={t('revokeIntro')}
         footer={
           <>
             <Button variant="ghost" onClick={() => setDialog(undefined)}>{t('cancel')}</Button>
-            <Button variant="primary" disabled={busy} onClick={() => {
-              if (typeof dialog !== 'object') return
-              const { id } = dialog.controller
-              setDialog(undefined)
-              void run(async () => {
-                await client.revokeController(id)
-                await store?.refresh()
-              }, t('revoked'))
-            }}>{t('revoke')}</Button>
+            <Button
+              variant="primary"
+              className="dsh-mqtt-danger"
+              disabled={pendingAction !== undefined}
+              onClick={() => {
+                if (revoking === undefined) return
+                const { id } = revoking
+                setDialog(undefined)
+                void run(`controller:revoke:${id}`, async () => {
+                  await client.revokeController(id)
+                  await store?.refresh()
+                }, t('revoked'))
+              }}
+            >
+              {t('revoke')}
+            </Button>
           </>
         }
       />

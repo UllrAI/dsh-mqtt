@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -84,6 +84,40 @@ describe('RequestStore', () => {
     const reopened = new RequestStore(file, 100, () => clock)
     await reopened.open()
     expect(await reopened.hasSession('owned-session')).toBe(true)
+  })
+
+  it('claims a session the agent reports only in its result', async () => {
+    const { store } = await fixture()
+    await store.reserve('resumed', 'fingerprint')
+    await store.activate('resumed', 'first-session')
+    // A resumed conversation answers on a different session than it started on.
+    await store.finish('resumed', protocolResult('resumed', 'completed', { sessionId: 'agent-chosen' }))
+
+    expect(await store.hasSession('agent-chosen')).toBe(true)
+    expect(await store.hasSession('first-session')).toBe(true)
+  })
+
+  it('keeps the session ledger free of duplicates so it cannot grow unbounded', async () => {
+    const { store, file } = await fixture()
+    for (const id of ['a', 'b', 'c']) {
+      await store.reserve(id, 'fingerprint')
+      // Every request lands on the same session, as a resumed conversation does.
+      await store.activate(id, 'shared-session')
+    }
+
+    const persisted = JSON.parse(await readFile(file, 'utf8')) as { sessions: string[] }
+    expect(persisted.sessions).toEqual(['shared-session'])
+  })
+
+  it('reads a state file written before the session ledger existed', async () => {
+    const { store, file } = await fixture()
+    await store.close()
+    await writeFile(file, JSON.stringify({ version: 1, requests: {} }), 'utf8')
+
+    const reopened = new RequestStore(file, 100)
+    await reopened.open()
+    expect(await reopened.hasSession('anything')).toBe(false)
+    await reopened.close()
   })
 
   it('handles topic-safe prototype property names without corrupting dictionaries', async () => {

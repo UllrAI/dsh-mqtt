@@ -59,6 +59,16 @@ function panel(client: ManagementClient, onToken: (token: string) => void = () =
   return render(<WorkerPanel client={client} t={t} locale="en-US" onToken={onToken} />)
 }
 
+/**
+ * Wait for the node state line.
+ *
+ * Health rows are translated too, so `Ready` and `Needs attention` each appear
+ * in two places; the selector pins the assertion to the state line.
+ */
+function findState(text: string): Promise<HTMLElement> {
+  return screen.findByText(text, { selector: '.dsh-mqtt-state' })
+}
+
 beforeEach(() => {
   // The panel opens an SSE stream on mount; jsdom has no EventSource.
   vi.stubGlobal('EventSource', undefined)
@@ -74,14 +84,16 @@ describe('WorkerPanel', () => {
   it('shows node state, load, and health once the gateway answers', async () => {
     panel(stubClient())
 
-    expect(await screen.findByText(en.stateReady)).toBeDefined()
+    expect(await findState(en.stateReady)).toBeDefined()
     expect(screen.getByText('Build worker')).toBeDefined()
     expect(screen.getByText(/1 of 4 task slots in use/)).toBeDefined()
     expect(screen.getByText(/1 workspaces ready/)).toBeDefined()
     expect(screen.getByText('0.1.2')).toBeDefined()
 
     const health = screen.getByRole('list', { name: en.healthTitle })
-    expect(within(health).getByText('broker')).toBeDefined()
+    // Check names are translated, not the raw machine identifiers.
+    expect(within(health).getByText(en.healthBroker)).toBeDefined()
+    expect(within(health).getByText(en.healthAgent)).toBeDefined()
     // A check with a message shows the message, not the bare status.
     expect(within(health).getByText('reconnecting')).toBeDefined()
   })
@@ -91,21 +103,21 @@ describe('WorkerPanel', () => {
     void health
     panel(stubClient({ status: vi.fn().mockResolvedValue(withoutHealth) }))
 
-    await screen.findByText(en.stateReady)
+    await findState(en.stateReady)
     expect(screen.queryByRole('list', { name: en.healthTitle })).toBeNull()
   })
 
   it('says so when the broker connection is down', async () => {
     panel(stubClient({ status: vi.fn().mockResolvedValue({ ...status, online: false, state: 'degraded' }) }))
 
-    expect(await screen.findByText(en.stateDegraded)).toBeDefined()
+    expect(await findState(en.stateDegraded)).toBeDefined()
     expect(screen.getByText(new RegExp(en.brokerDisconnected))).toBeDefined()
   })
 
   it('reloads on demand', async () => {
     const client = stubClient()
     panel(client)
-    await screen.findByText(en.stateReady)
+    await findState(en.stateReady)
     const before = vi.mocked(client.status).mock.calls.length
 
     await userEvent.click(screen.getByRole('button', { name: en.refresh }))
@@ -123,6 +135,9 @@ describe('WorkerPanel', () => {
     panel(stubClient({ controllers, authorizeController }))
 
     const pending = await screen.findByRole('list', { name: '2 waiting for approval' })
+    // The section count covers approved controllers only, so the pending rows
+    // need a heading a sighted operator can actually read.
+    expect(screen.getByText('2 waiting for approval')).toBeDefined()
     const rows = within(pending).getAllByRole('listitem')
     expect(rows.map(row => within(row).getByText(/Laptop|Desktop|CI/).textContent)).toEqual(['Laptop', 'Desktop'])
 
@@ -160,8 +175,9 @@ describe('WorkerPanel', () => {
     await userEvent.click(await screen.findByRole('button', { name: en.revoke }))
     expect(revokeController).not.toHaveBeenCalled()
 
-    const dialog = await screen.findByRole('dialog')
-    expect(within(dialog).getByText('CI runner')).toBeDefined()
+    // The name rides in the title, so the dialog says which one it will revoke.
+    const dialog = await screen.findByRole('dialog', { name: 'Revoke CI runner?' })
+    expect(within(dialog).getByText(en.revokeIntro)).toBeDefined()
     await userEvent.click(within(dialog).getByRole('button', { name: en.revoke }))
 
     expect(revokeController).toHaveBeenCalledWith('c9')
@@ -205,6 +221,76 @@ describe('WorkerPanel', () => {
     expect(screen.queryByText(en.historyEmpty)).toBeNull()
   })
 
+  it('opens task details with the controller that submitted it', async () => {
+    panel(stubClient({
+      controllers: vi.fn().mockResolvedValue([
+        { id: 'c1', name: 'Laptop', scopes: ['submit'], status: 'authorized', createdAt: 1, updatedAt: 1, expiresAt: 2 },
+      ]),
+      requests: vi.fn().mockResolvedValue([{
+        id: 'req-1',
+        status: 'completed',
+        createdAt: Date.parse('2026-03-05T14:30:00.000Z'),
+        updatedAt: Date.parse('2026-03-05T14:30:12.000Z'),
+        workspace: 'app',
+        controllerId: 'c1',
+        result: { summary: 'shipped the fix' },
+      }],
+      ),
+    }))
+
+    await userEvent.click(await screen.findByRole('button', { name: en.taskDetail }))
+    const dialog = await screen.findByRole('dialog')
+
+    // The controller shows by name; a raw id would tell the operator nothing.
+    expect(within(dialog).getByText('Laptop')).toBeDefined()
+    expect(within(dialog).getByText('app')).toBeDefined()
+    expect(within(dialog).getByText('12s')).toBeDefined()
+    expect(within(dialog).getByText('shipped the fix')).toBeDefined()
+    expect(within(dialog).getByText('req-1')).toBeDefined()
+  })
+
+  it('names an unknown controller rather than leaving the field blank', async () => {
+    panel(stubClient({
+      requests: vi.fn().mockResolvedValue([
+        { id: 'req-1', status: 'failed', createdAt: 1, updatedAt: 2, controllerId: 'gone' },
+      ]),
+    }))
+
+    await userEvent.click(await screen.findByRole('button', { name: en.taskDetail }))
+    const dialog = await screen.findByRole('dialog')
+
+    expect(within(dialog).getByText(en.taskUnknownController)).toBeDefined()
+  })
+
+  it('stops a running task and reflects that the stop is already in flight', async () => {
+    const cancelRequest = vi.fn().mockResolvedValue(undefined)
+    const running = { id: 'req-1', status: 'active', createdAt: 1, updatedAt: 2 }
+    const requests = vi.fn()
+      .mockResolvedValueOnce([running])
+      .mockResolvedValue([{ ...running, cancelRequested: true }])
+    panel(stubClient({ cancelRequest, requests }))
+
+    await userEvent.click(await screen.findByRole('button', { name: en.stop }))
+
+    expect(cancelRequest).toHaveBeenCalledWith('req-1')
+    expect(await screen.findByText(en.stopRequested)).toBeDefined()
+    // The row stays until the worker reports a terminal state, but the button
+    // must not invite a second stop.
+    const stopping = await screen.findByRole('button', { name: en.stopping })
+    expect(stopping.hasAttribute('disabled')).toBe(true)
+  })
+
+  it('offers no stop button once a task has finished', async () => {
+    panel(stubClient({
+      requests: vi.fn().mockResolvedValue([
+        { id: 'req-1', status: 'completed', createdAt: 1, updatedAt: 2 },
+      ]),
+    }))
+
+    await screen.findByRole('button', { name: en.taskDetail })
+    expect(screen.queryByRole('button', { name: en.stop })).toBeNull()
+  })
+
   it('shows the empty states when the worker has no controllers or tasks', async () => {
     panel(stubClient())
 
@@ -242,6 +328,27 @@ describe('WorkerPanel', () => {
     expect(copied).toMatchObject({ controller_id: 'c1', token: 'invite-secret', broker_url: config.url })
     expect(JSON.stringify(copied)).not.toContain('password')
     expect(await screen.findByText(en.copied)).toBeDefined()
+  })
+
+  it('approves a controller from the invite dialog, without a second trip to the list', async () => {
+    const createInvite = vi.fn().mockResolvedValue({
+      id: 'c1', name: 'Laptop', token: 'invite-secret', scopes: ['submit'], expiresAt: Date.now() + 600_000,
+    })
+    const authorizeController = vi.fn().mockResolvedValue(undefined)
+    panel(stubClient({ createInvite, authorizeController }))
+
+    await userEvent.click(await screen.findByRole('button', { name: en.addController }))
+    const dialog = await screen.findByRole('dialog')
+    await userEvent.type(within(dialog).getByRole('textbox'), 'Laptop')
+    await userEvent.click(within(dialog).getByRole('button', { name: en.inviteCreate }))
+    await within(dialog).findByText(en.inviteReady)
+
+    await userEvent.click(within(dialog).getByRole('button', { name: en.approve }))
+
+    expect(authorizeController).toHaveBeenCalledWith('c1')
+    // Settled, so the same invite cannot be approved twice.
+    const settled = await within(dialog).findByRole('button', { name: en.approved })
+    expect(settled.hasAttribute('disabled')).toBe(true)
   })
 
   it('reports a clipboard that refuses instead of silently doing nothing', async () => {
@@ -324,9 +431,20 @@ describe('WorkerPanel', () => {
     expect(within(dialog).getByText('team')).toBeDefined()
     expect(within(dialog).getByText(en.enabled)).toBeDefined()
     expect(within(dialog).getByText(en.privacyNote)).toBeDefined()
+    expect(within(dialog).queryByText(en.controllerAuthOffNote)).toBeNull()
 
     await userEvent.click(within(dialog).getByRole('button', { name: en.done }))
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  })
+
+  it('spells out the risk when controller approval is off', async () => {
+    panel(stubClient({ config: vi.fn().mockResolvedValue({ ...config, controller_auth_required: false }) }))
+
+    await userEvent.click(await screen.findByRole('button', { name: en.connectionTitle }))
+    const dialog = await screen.findByRole('dialog')
+
+    expect(within(dialog).getByText(en.disabled)).toBeDefined()
+    expect(within(dialog).getByText(en.controllerAuthOffNote)).toBeDefined()
   })
 
   it('closes a dialog on Escape', async () => {

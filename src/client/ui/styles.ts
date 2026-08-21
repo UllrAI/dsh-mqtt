@@ -25,6 +25,8 @@ export const PANEL_CSS = `
 .dsh-mqtt-live { display: inline-flex; align-items: center; gap: 6px; color: var(--dsw-alias-label-tertiary); font-size: 13px; white-space: nowrap; }
 
 .dsh-mqtt-muted { color: var(--dsw-alias-label-tertiary); }
+.dsh-mqtt-subhead { color: var(--dsw-alias-label-tertiary); font-size: 12px; margin: 0; }
+.dsh-mqtt-warning { color: var(--dsw-alias-state-error-primary); }
 .dsh-mqtt-grow { flex: 1; min-width: 0; }
 .dsh-mqtt-mono { font-family: var(--dsw-font-markdown-code-block, ui-monospace, monospace); word-break: break-all; }
 .dsh-mqtt-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
@@ -77,6 +79,15 @@ export const PANEL_CSS = `
 .dsh-mqtt-banner-error { border-color: var(--dsw-alias-state-error-primary); }
 
 .dsh-mqtt-label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--dsw-alias-label-secondary); }
+.dsh-mqtt-label + .dsh-mqtt-label { margin-top: 12px; }
+.dsh-mqtt-label > span { color: var(--dsw-alias-label-primary); font-size: 14px; overflow-wrap: anywhere; }
+
+/* Destructive confirm. The primitive has no danger variant, so recolour the
+   primary one rather than reimplement the button. */
+.dsh-mqtt-danger {
+  background: var(--dsw-alias-state-error-primary);
+  border-color: var(--dsw-alias-state-error-primary);
+}
 
 .dsh-mqtt-code {
   max-height: 220px;

@@ -33,9 +33,23 @@ export class TopicLayout {
   }
 
   requestIdFromControl(topic: string): string | undefined {
+    return this.requestIdFrom(topic, 'control')
+  }
+
+  requestIdFromEvents(topic: string): string | undefined {
+    return this.requestIdFrom(topic, 'events')
+  }
+
+  requestIdFromResult(topic: string): string | undefined {
+    return this.requestIdFrom(topic, 'result')
+  }
+
+  /** Reverse of `control`/`events`/`result`: string slicing, so topic ids never reach a regex. */
+  private requestIdFrom(topic: string, leaf: 'control' | 'events' | 'result'): string | undefined {
     const prefix = `${this.base}/requests/`
-    if (!topic.startsWith(prefix) || !topic.endsWith('/control')) return undefined
-    const requestId = topic.slice(prefix.length, -'/control'.length)
+    const suffix = `/${leaf}`
+    if (!topic.startsWith(prefix) || !topic.endsWith(suffix)) return undefined
+    const requestId = topic.slice(prefix.length, -suffix.length)
     if (requestId.includes('/') || !isRequestId(requestId)) return undefined
     return requestId
   }

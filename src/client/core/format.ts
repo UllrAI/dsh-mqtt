@@ -53,10 +53,63 @@ export function healthTone(status: 'ready' | 'degraded' | 'offline'): Tone {
   return status === 'ready' ? 'done' : status === 'offline' ? 'error' : 'warning'
 }
 
-export function formatTime(value: number | string | undefined, locale: string, t: Translate): string {
-  if (value === undefined) return t('neverUsed')
+const HEALTH_NAME_KEYS: Record<string, keyof Dictionary> = {
+  broker: 'healthBroker',
+  agent: 'healthAgent',
+  model: 'healthModel',
+}
+
+const HEALTH_STATUS_KEYS: Record<string, keyof Dictionary> = {
+  ready: 'healthReady',
+  degraded: 'healthDegraded',
+  offline: 'healthOffline',
+  missing: 'healthMissing',
+  'not-directory': 'healthNotDirectory',
+  unreadable: 'healthUnreadable',
+  unavailable: 'healthUnavailable',
+}
+
+/**
+ * A readable name for a health row.
+ *
+ * The gateway names checks with protocol identifiers so a machine consumer can
+ * match on them; the workspace ones carry an alias the operator chose, which is
+ * already readable and must not be translated.
+ */
+export function healthLabel(name: string, t: Translate): string {
+  const workspace = name.startsWith('workspace:') ? name.slice('workspace:'.length) : undefined
+  if (workspace !== undefined) return t('healthWorkspace', { alias: workspace })
+  const key = HEALTH_NAME_KEYS[name]
+  return key === undefined ? name : t(key)
+}
+
+/**
+ * The right-hand detail for a health row.
+ *
+ * A check's `message` is either an operator-facing string the gateway built or
+ * one of the host's status identifiers; translate the identifiers and pass
+ * anything else through, since inventing a fallback would hide a real error.
+ */
+export function healthDetail(check: { status: string; message?: string }, t: Translate): string {
+  const raw = check.message ?? check.status
+  const key = HEALTH_STATUS_KEYS[raw]
+  return key === undefined ? raw : t(key)
+}
+
+/**
+ * An absolute date and time, or a caller-chosen word when there is none.
+ *
+ * The empty case is the caller's to name: "never used" reads right for a
+ * controller's last activity and wrong for an expiry date.
+ */
+export function formatTime(
+  value: number | string | undefined,
+  locale: string,
+  fallback: string,
+): string {
+  if (value === undefined) return fallback
   const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return t('neverUsed')
+  if (Number.isNaN(date.getTime())) return fallback
   return new Intl.DateTimeFormat(locale, { dateStyle: 'short', timeStyle: 'short' }).format(date)
 }
 
@@ -64,8 +117,31 @@ export function formatClock(value: number | string, locale: string): string {
   return new Intl.DateTimeFormat(locale, { timeStyle: 'short' }).format(new Date(value))
 }
 
-export function readyWorkspaceCount(status: NodeStatus | undefined): number {
-  return status?.workspaces?.filter(workspace => workspace.status === 'ready').length ?? 0
+/** Ready count over total, so "2" cannot be mistaken for "all of them". */
+export function workspaceReadiness(status: NodeStatus | undefined): { ready: number; total: number } {
+  const workspaces = status?.workspaces ?? []
+  return { ready: workspaces.filter(workspace => workspace.status === 'ready').length, total: workspaces.length }
+}
+
+/** Elapsed time in the coarsest unit that still reads precisely. */
+export function formatDuration(ms: number, t: Translate): string {
+  if (ms < 1_000) return t('durationMs', { count: Math.max(0, Math.round(ms)) })
+  const seconds = Math.round(ms / 1_000)
+  if (seconds < 60) return t('durationSeconds', { count: seconds })
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return t('durationMinutes', { count: minutes, seconds: seconds % 60 })
+  return t('durationHours', { count: Math.floor(minutes / 60), minutes: minutes % 60 })
+}
+
+/**
+ * Attribute a task to a controller by name.
+ *
+ * Returns undefined when the id is absent or no longer listed — a revoked
+ * controller is pruned from the list while its tasks stay in history.
+ */
+export function controllerName(id: string | undefined, controllers: Array<{ id: string; name: string }>): string | undefined {
+  if (id === undefined) return undefined
+  return controllers.find(controller => controller.id === id)?.name
 }
 
 /** The controller config a worker hands out; deliberately free of broker secrets. */

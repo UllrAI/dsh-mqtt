@@ -1,9 +1,11 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-import { dirname, extname, resolve } from 'node:path'
+import { dirname, extname, isAbsolute, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { ResolvedConfig } from './config.ts'
 import type { MqttAgentGateway } from './gateway.ts'
+import { NotFoundError } from './state-store.ts'
 import type { Logger } from './transport.ts'
 
 interface ManagementServerOptions {
@@ -38,6 +40,17 @@ class ManagementHttpError extends Error {
   ) {
     super(message)
   }
+}
+
+/**
+ * Client errors declare their own status; everything else is ours to own.
+ *
+ * An explicit pair rather than a `status` duck-type, so only errors written to
+ * be read by a client can carry their message out of `handle`.
+ */
+function httpStatus(error: unknown): number {
+  if (error instanceof ManagementHttpError) return error.status
+  return error instanceof NotFoundError ? error.status : 500
 }
 
 async function readJson(request: IncomingMessage): Promise<Record<string, unknown>> {
@@ -110,13 +123,54 @@ function allowedOrigin(request: IncomingMessage, config: ResolvedConfig): string
   return origin !== undefined && isLoopbackOrigin(origin) ? origin : undefined
 }
 
+/** Length-independent comparison, so a wrong token leaks no timing signal. */
+function secretsMatch(a: string, b: string): boolean {
+  const left = Buffer.from(a, 'utf8')
+  const right = Buffer.from(b, 'utf8')
+  if (left.byteLength !== right.byteLength) return false
+  return timingSafeEqual(left, right)
+}
+
 function authAllowed(request: IncomingMessage, token: string | undefined): boolean {
   if (token === undefined) return true
   const value = request.headers.authorization
-  return value === `Bearer ${token}`
+  return value !== undefined && secretsMatch(value, `Bearer ${token}`)
+}
+
+/**
+ * Reject cross-site callers whose origin we do not vouch for.
+ *
+ * CORS stops a foreign page from *reading* our responses, but a form-style POST
+ * still executes server-side. So an `Origin` we did not allow is refused before
+ * it reaches a handler; requests without one (curl, the controller CLI) are
+ * unaffected, and same-origin browsers send an allowed origin.
+ *
+ * The opaque `null` origin is refused too: every legitimate browser caller here
+ * is served over HTTP by this same server and sends a real origin, so `null`
+ * only ever arrives from a sandboxed frame trying its luck.
+ */
+function crossSiteDenied(request: IncomingMessage, origin: string | undefined): boolean {
+  const sent = request.headers.origin
+  if (sent === undefined) return false
+  return sent !== origin
+}
+
+/**
+ * Require a JSON content type on mutating requests.
+ *
+ * `text/plain` and the form types are CORS-safelisted: a browser sends them
+ * without a preflight, which is exactly the shape a CSRF attempt takes. Demanding
+ * `application/json` puts every mutation behind a preflight we control.
+ */
+function assertJsonBody(request: IncomingMessage): void {
+  const type = request.headers['content-type']?.split(';')[0]?.trim().toLowerCase()
+  if (type !== 'application/json') throw new ManagementHttpError(415, 'content-type must be application/json')
 }
 
 const SSE_HEARTBEAT_MS = 25_000
+const TICKET_TTL_MS = 15_000
+/** History page size. Mirrors `REQUEST_PAGE_SIZE` in the client, and caps `?limit`. */
+const REQUEST_PAGE_SIZE = 50
 
 function sseFrame(event: string, data: unknown): string {
   return `event: ${event}\ndata: ${json(data)}\n\n`
@@ -125,8 +179,28 @@ function sseFrame(event: string, data: unknown): string {
 export class ManagementServer {
   private server: Server | undefined
   private readonly streams = new Set<() => void>()
+  /** Single-use SSE tickets, keyed by value; see `ManagementClient.streamTicket`. */
+  private readonly tickets = new Map<string, number>()
 
   constructor(private readonly options: ManagementServerOptions) {}
+
+  private issueTicket(): string {
+    const now = Date.now()
+    for (const [value, expiresAt] of this.tickets) {
+      if (expiresAt <= now) this.tickets.delete(value)
+    }
+    const ticket = randomBytes(32).toString('base64url')
+    this.tickets.set(ticket, now + TICKET_TTL_MS)
+    return ticket
+  }
+
+  /** Consumes the ticket: a replayed query string buys nothing. */
+  private redeemTicket(ticket: string | null): boolean {
+    if (ticket === null) return false
+    const expiresAt = this.tickets.get(ticket)
+    this.tickets.delete(ticket)
+    return expiresAt !== undefined && expiresAt > Date.now()
+  }
 
   async start(): Promise<void> {
     if (this.options.config.managementPort === 0) return
@@ -138,8 +212,12 @@ export class ManagementServer {
           response.destroy(error instanceof Error ? error : undefined)
           return
         }
-        const status = error instanceof ManagementHttpError ? error.status : 500
-        writeJson(response, status, { error: error instanceof Error ? error.message : String(error) }, allowedOrigin(request, config))
+        const status = httpStatus(error)
+        // Only deliberate client errors carry their message out; anything else
+        // could describe the filesystem or the broker.
+        if (status >= 500) logger.error('dsh-mqtt: management request failed', error)
+        const message = status >= 500 ? 'internal error' : error instanceof Error ? error.message : String(error)
+        writeJson(response, status, { error: message }, allowedOrigin(request, config))
       })
     })
     this.server = server
@@ -181,12 +259,27 @@ export class ManagementServer {
       writeJson(response, 204, {}, origin)
       return
     }
+    if (crossSiteDenied(request, origin)) {
+      writeJson(response, 403, { error: 'origin not allowed' }, origin)
+      return
+    }
+    // The stream accepts a ticket because EventSource cannot send headers. A
+    // client that *can* send one still authenticates the ordinary way.
+    if (request.method === 'GET' && url.pathname === '/api/stream') {
+      if (!authAllowed(request, config.managementToken) && !this.redeemTicket(url.searchParams.get('ticket'))) {
+        writeJson(response, 401, { error: 'management authorization required' }, origin)
+        return
+      }
+      this.streamNotices(response, origin)
+      return
+    }
     if (!authAllowed(request, config.managementToken)) {
       writeJson(response, 401, { error: 'management authorization required' }, origin)
       return
     }
-    if (request.method === 'GET' && url.pathname === '/api/stream') {
-      this.streamNotices(response, origin)
+    if (request.method === 'POST' && url.pathname === '/api/stream/tickets') {
+      assertJsonBody(request)
+      writeJson(response, 201, { ticket: this.issueTicket() }, origin)
       return
     }
     if (request.method === 'GET' && url.pathname === '/api/status') {
@@ -211,11 +304,23 @@ export class ManagementServer {
       return
     }
     if (request.method === 'GET' && url.pathname === '/api/requests') {
-      const limit = Number(url.searchParams.get('limit') ?? '100')
-      writeJson(response, 200, { requests: await gateway.listRequests(Number.isFinite(limit) ? limit : 100) }, origin)
+      const requested = Number(url.searchParams.get('limit') ?? REQUEST_PAGE_SIZE)
+      const limit = Number.isFinite(requested) ? Math.max(1, Math.min(REQUEST_PAGE_SIZE, Math.floor(requested))) : REQUEST_PAGE_SIZE
+      writeJson(response, 200, { requests: await gateway.listRequests(limit) }, origin)
+      return
+    }
+    const cancelMatch = /^\/api\/requests\/([^/]+)\/cancel$/.exec(url.pathname)
+    if (cancelMatch !== null && request.method === 'POST') {
+      assertJsonBody(request)
+      const outcome = await gateway.cancelRequest(decodeSegment(cancelMatch[1] as string))
+      if (outcome.reason === 'not-found') throw new ManagementHttpError(404, 'request does not exist')
+      // Already finished, or finishing: the operator's intent is satisfied either way.
+      if (outcome.reason === 'not-active') throw new ManagementHttpError(409, 'request is no longer running')
+      writeJson(response, 202, { ok: true }, origin)
       return
     }
     if (request.method === 'POST' && url.pathname === '/api/controllers/invites') {
+      assertJsonBody(request)
       const body = await readJson(request)
       const name = typeof body.name === 'string' ? body.name.trim() : ''
       if (name.length === 0 || name.length > 128) throw new ManagementHttpError(400, 'name must contain 1 to 128 characters')
@@ -232,6 +337,7 @@ export class ManagementServer {
     }
     const authorizeMatch = /^\/api\/controllers\/([^/]+)\/authorize$/.exec(url.pathname)
     if (authorizeMatch !== null && request.method === 'POST') {
+      assertJsonBody(request)
       writeJson(response, 200, { controller: await gateway.authorizeController(decodeSegment(authorizeMatch[1] as string)) }, origin)
       return
     }
@@ -259,11 +365,19 @@ export class ManagementServer {
     if (origin !== undefined) response.setHeader('access-control-allow-origin', origin)
     response.write(': connected\n\n')
 
-    const unsubscribe = this.options.gateway.subscribe(notice => {
-      response.write(sseFrame(notice.kind, notice))
-    })
+    // A reader that stops draining must not become unbounded memory here. Notices
+    // are refresh hints, so dropping frames while backed up costs the client one
+    // coalesced refetch, not correctness.
+    let backedUp = false
+    const push = (frame: string): void => {
+      if (backedUp) return
+      backedUp = !response.write(frame)
+      if (backedUp) response.once('drain', () => { backedUp = false })
+    }
+
+    const unsubscribe = this.options.gateway.subscribe(notice => push(sseFrame(notice.kind, notice)))
     // Comment frames keep intermediaries from reaping an idle connection.
-    const heartbeat = setInterval(() => response.write(': ping\n\n'), SSE_HEARTBEAT_MS)
+    const heartbeat = setInterval(() => push(': ping\n\n'), SSE_HEARTBEAT_MS)
     heartbeat.unref?.()
 
     const close = (): void => {
@@ -279,7 +393,10 @@ export class ManagementServer {
   private async serveUi(pathname: string, response: ServerResponse, origin: string | undefined): Promise<void> {
     const requested = pathname === '/' ? 'index.html' : pathname.slice(1)
     const file = resolve(STATIC_ROOT, requested)
-    if (!file.startsWith(`${STATIC_ROOT}/`) && file !== STATIC_ROOT) {
+    // `relative()` handles the platform separator; a leading `..` or an absolute
+    // result means the join escaped the asset root.
+    const inside = relative(STATIC_ROOT, file)
+    if (inside.startsWith('..') || isAbsolute(inside)) {
       writeJson(response, 400, { error: 'invalid path' }, origin)
       return
     }

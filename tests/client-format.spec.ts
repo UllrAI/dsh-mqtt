@@ -1,14 +1,17 @@
 import { describe, expect, it } from 'vitest'
 import {
   formatClock,
+  formatDuration,
   formatTime,
+  healthDetail,
+  healthLabel,
   healthTone,
   inviteConfigText,
   nodeStateLabel,
   nodeStateTone,
-  readyWorkspaceCount,
   requestStatusLabel,
   requestStatusTone,
+  workspaceReadiness,
 } from '../src/client/core/format.ts'
 import { createTranslate, en, interpolate, zh } from '../src/client/core/i18n.ts'
 
@@ -70,21 +73,44 @@ describe('state presentation', () => {
 describe('formatting', () => {
   it('formats timestamps from both epoch millis and ISO strings', () => {
     const iso = '2026-03-05T14:30:00.000Z'
-    expect(formatTime(iso, 'en-US', t)).toBe(formatTime(Date.parse(iso), 'en-US', t))
+    expect(formatTime(iso, 'en-US', en.unknownTime)).toBe(formatTime(Date.parse(iso), 'en-US', en.unknownTime))
     expect(formatClock(iso, 'en-US')).toMatch(/\d/)
   })
 
-  it('reports an absent or unparseable timestamp as never used', () => {
-    expect(formatTime(undefined, 'en-US', t)).toBe(en.neverUsed)
-    expect(formatTime('not a date', 'en-US', t)).toBe(en.neverUsed)
+  it('lets the caller name the empty case', () => {
+    expect(formatTime(undefined, 'en-US', en.neverUsed)).toBe(en.neverUsed)
+    expect(formatTime('not a date', 'en-US', en.noHeartbeat)).toBe(en.noHeartbeat)
   })
 
-  it('counts only ready workspaces', () => {
-    expect(readyWorkspaceCount(undefined)).toBe(0)
-    expect(readyWorkspaceCount({ workspaces: [] } as never)).toBe(0)
-    expect(readyWorkspaceCount({
+  it('reports ready workspaces over the total', () => {
+    expect(workspaceReadiness(undefined)).toEqual({ ready: 0, total: 0 })
+    expect(workspaceReadiness({ workspaces: [] } as never)).toEqual({ ready: 0, total: 0 })
+    expect(workspaceReadiness({
       workspaces: [{ alias: 'a', status: 'ready' }, { alias: 'b', status: 'missing' }],
-    } as never)).toBe(1)
+    } as never)).toEqual({ ready: 1, total: 2 })
+  })
+
+  it('picks the coarsest duration unit that still reads precisely', () => {
+    expect(formatDuration(0, t)).toBe(interpolate(en.durationMs, { count: 0 }))
+    expect(formatDuration(-5, t)).toBe(interpolate(en.durationMs, { count: 0 }))
+    expect(formatDuration(4_200, t)).toBe(interpolate(en.durationSeconds, { count: 4 }))
+    expect(formatDuration(90_000, t)).toBe(interpolate(en.durationMinutes, { count: 1, seconds: 30 }))
+    expect(formatDuration(7_500_000, t)).toBe(interpolate(en.durationHours, { count: 2, minutes: 5 }))
+  })
+})
+
+describe('health rows', () => {
+  it('translates protocol check names but keeps operator-chosen aliases', () => {
+    expect(healthLabel('broker', t)).toBe(en.healthBroker)
+    expect(healthLabel('workspace:repo', t)).toBe(interpolate(en.healthWorkspace, { alias: 'repo' }))
+    expect(healthLabel('something-new', t)).toBe('something-new')
+  })
+
+  it('translates status identifiers and passes real messages through', () => {
+    expect(healthDetail({ status: 'ready' }, t)).toBe(en.healthReady)
+    expect(healthDetail({ status: 'degraded', message: 'missing' }, t)).toBe(en.healthMissing)
+    expect(healthDetail({ status: 'degraded', message: 'broker refused the connection' }, t))
+      .toBe('broker refused the connection')
   })
 })
 
