@@ -670,7 +670,7 @@ git tag v0.1.3
 git push origin v0.1.3
 ```
 
-`Release` 工作流会校验 tag 是否与 `package.json` 一致，使用锁文件安装依赖，运行完整的 `pnpm check`，发布 npm 包，并创建带自动生成说明的 GitHub Release；若重试时该版本已经存在于 npm，则会跳过重复发布。请在仓库 Secrets 中配置名为 `NPM_TOKEN` 的 npm granular automation token，并确保它有权发布 `dsh-mqtt`。在单独定义预发布策略前，工作流会拒绝预发布 tag。只有版本号、变更日志和发布内容都准备好后，才应创建 tag。
+`Release` 工作流会校验 tag 是否与 `package.json` 一致，使用锁文件安装依赖，运行完整的 `pnpm check`，发布 npm 包，并创建带自动生成说明的 GitHub Release；若重试时该版本已经存在于 npm，则会跳过重复发布。发布走 [trusted publishing](https://docs.npmjs.com/trusted-publishers/)：任务临时申请一个 OIDC token 换取发布权限，因此不存在需要定期轮换的长期密钥，每次发布还会附带 provenance 签名。这需要事先在 npmjs.com 上为本包配置 trusted publisher，指向本仓库的 `release.yml`。在单独定义预发布策略前，工作流会拒绝预发布 tag。只有版本号、变更日志和发布内容都准备好后，才应创建 tag。
 
 公共模块会导出 Cordis 插件以及 `MqttAgentGateway`、`RequestStore` 和 `TopicLayout`。`dsh-mqtt/protocol` 会导出协议类型、解析器、指纹和信封构造函数。
 

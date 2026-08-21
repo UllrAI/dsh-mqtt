@@ -13,8 +13,17 @@ describe('release workflow', () => {
     expect(workflow).toContain('npm view "${package_name}@${package_version}" version')
     expect(workflow).toContain("if: steps.npm.outputs.published != 'true'")
     expect(workflow).toContain('pnpm publish --no-git-checks')
-    expect(workflow).toContain('NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}')
     expect(workflow).toContain('softprops/action-gh-release@v3')
+  })
+
+  it('publishes through OIDC rather than a long-lived token', () => {
+    // npm caps write tokens at 90 days; trusted publishing has no such treadmill.
+    expect(workflow).toContain('id-token: write')
+    expect(workflow).toContain('ACTIONS_ID_TOKEN_REQUEST_URL')
+    // A registry-url would write an .npmrc referencing NODE_AUTH_TOKEN, which
+    // pnpm rejects once the variable is gone.
+    expect(workflow).not.toContain('registry-url')
+    expect(workflow).not.toContain('NPM_TOKEN')
   })
 
   it('does not enable prerelease publishing implicitly', () => {
