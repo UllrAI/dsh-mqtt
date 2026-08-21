@@ -173,7 +173,11 @@ The Worker UI comes in two forms. Both render the same panel against the same AP
 http://127.0.0.1:3210/
 ```
 
+![The Worker UI, showing node health, controllers, and recent tasks](https://raw.githubusercontent.com/UllrAI/dsh-mqtt/main/docs/worker-ui-en.png)
+
 Broker, Agent, model, workspace, and capacity data come from live Gateway checks. Both forms create controller invitations, approve access, list recent tasks, report last use, and revoke controllers. Updates arrive over Server-Sent Events and fall back to polling when the stream cannot be held open. Set `managementPort: 0` to turn off the API and the standalone page — which also leaves the DSH panel with nothing to read.
+
+The panel speaks English and Chinese. Inside DSH it follows the shell's language; the standalone page picks one up from the browser and offers a switch in its header.
 
 The management server binds to loopback by default. A non-loopback `managementHost` requires `managementToken` or `managementTokenEnv`; the UI asks for that token and keeps it in `sessionStorage` for the current tab only, while API clients send `Authorization: Bearer <token>`. Cross-origin requests are accepted from loopback origins, which is what the DSH panel needs; set `managementCorsOrigin` to name a single exact origin instead. Never expose an unauthenticated management endpoint to a network.
 

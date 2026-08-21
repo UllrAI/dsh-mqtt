@@ -6,7 +6,7 @@
  * the panel follows the shell's theme without a stylesheet of its own.
  */
 
-import { useCallback, useState } from 'react'
+import { useCallback, useState, type ReactNode } from 'react'
 import { Button, Input, Modal, StateDot, Toast, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { Controller, ControllerInvite, ManagementClient } from '../core/api.ts'
 import type { Translate } from '../core/i18n.ts'
@@ -30,11 +30,18 @@ export interface WorkerPanelProps {
   locale: string
   /** Called with a token the user supplied for a gateway that requires one. */
   onToken?: (token: string) => void
+  /**
+   * Extra header control.
+   *
+   * The standalone page puts its language switch here; inside DSH the shell
+   * already owns that preference, so the panel leaves the slot empty.
+   */
+  headerAction?: ReactNode
 }
 
 type DialogKind = 'invite' | 'connection' | { controller: Controller }
 
-export function WorkerPanel({ client, t, locale, onToken }: WorkerPanelProps): JSX.Element {
+export function WorkerPanel({ client, t, locale, onToken, headerAction }: WorkerPanelProps): JSX.Element {
   const { state, store } = useManagementStore(client)
   const [dialog, setDialog] = useState<DialogKind>()
   const [toast, setToast] = useState<{ text: string; seq: number }>()
@@ -70,10 +77,13 @@ export function WorkerPanel({ client, t, locale, onToken }: WorkerPanelProps): J
           <h2>{t('title')}</h2>
           <p className="dsh-mqtt-muted">{t('subtitle')}</p>
         </div>
-        <span className="dsh-mqtt-live" title={state.live ? t('live') : t('polling')}>
-          <StateDot state={state.live ? 'done' : 'warning'} size={8} />
-          {state.live ? t('live') : t('polling')}
-        </span>
+        <div className="dsh-mqtt-head-aside">
+          <span className="dsh-mqtt-live" title={state.live ? t('live') : t('polling')}>
+            <StateDot state={state.live ? 'done' : 'warning'} size={8} />
+            {state.live ? t('live') : t('polling')}
+          </span>
+          {headerAction}
+        </div>
       </header>
 
       {state.loading && <p className="dsh-mqtt-muted">{t('loading')}</p>}

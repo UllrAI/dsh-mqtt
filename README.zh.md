@@ -173,7 +173,11 @@ Worker 界面有两种形态，背后是同一套面板和同一个 API，按部
 http://127.0.0.1:3210/
 ```
 
+![Worker 界面，展示节点健康、控制端与最近任务](https://raw.githubusercontent.com/UllrAI/dsh-mqtt/main/docs/worker-ui-zh.png)
+
 这里显示的 Broker、Agent、模型、工作区和任务容量均来自 Gateway 实时检查，不使用演示数据。两种形态都可以生成控制端邀请、确认授权、查看最近任务与最近使用时间并撤销控制端。更新通过 Server-Sent Events 推送，连接无法保持时自动退回轮询。设置 `managementPort: 0` 会同时关闭 API 与独立页面 —— DSH 面板届时也读不到任何数据。
+
+面板支持中英文。在 DSH 内跟随 DSH 的语言设置；独立页面会读取浏览器语言，也可以在页头随时切换。
 
 管理服务默认只绑定 loopback。若把 `managementHost` 设置为 `0.0.0.0` 或其他非本机地址，必须同时设置 `managementToken` 或 `managementTokenEnv`；界面会要求输入 token，并且只在当前标签页的 `sessionStorage` 中保存，API 调用则需发送 `Authorization: Bearer <token>`。跨域请求默认放行本机来源，这正是 DSH 面板所需；也可以设置 `managementCorsOrigin` 指定唯一的精确来源。不要把未认证的管理端口暴露到局域网或互联网。
 
