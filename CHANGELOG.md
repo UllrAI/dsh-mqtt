@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- Releases publish through npm trusted publishing (OIDC) instead of a stored `NPM_TOKEN`. npm caps write tokens at 90 days, so the old arrangement needed rotating every quarter; a short-lived, job-scoped credential removes the secret entirely and signs each release with a provenance attestation.
+
 ### Added
 
 - The standalone page has a language switch in its header and remembers the choice, matching what the DSH shell already does for the settings panel.

@@ -670,7 +670,7 @@ git tag v0.1.3
 git push origin v0.1.3
 ```
 
-The `Release` workflow verifies that the tag matches `package.json`, installs from the frozen lockfile, runs `pnpm check`, publishes the package to npm, and creates a GitHub Release with generated notes. A retry skips npm publication when that exact version already exists. Configure an npm granular automation token as the repository secret `NPM_TOKEN`; it must be allowed to publish `dsh-mqtt`. The workflow intentionally rejects prerelease tags until a separate prerelease policy is defined. Do not create a tag until the version, changelog, and release contents are ready.
+The `Release` workflow verifies that the tag matches `package.json`, installs from the frozen lockfile, runs `pnpm check`, publishes the package to npm, and creates a GitHub Release with generated notes. A retry skips npm publication when that exact version already exists. Publishing uses [trusted publishing](https://docs.npmjs.com/trusted-publishers/): the job mints a short-lived OIDC token and trades it for publish rights, so there is no long-lived secret to rotate and every release carries a provenance attestation. This requires a trusted publisher on npmjs.com naming this repository and `release.yml`. The workflow intentionally rejects prerelease tags until a separate prerelease policy is defined. Do not create a tag until the version, changelog, and release contents are ready.
 
 The public module exports the Cordis plugin plus `MqttAgentGateway`, `RequestStore`, and `TopicLayout`. `dsh-mqtt/protocol` exports protocol types, parsers, fingerprints, and envelope builders.
 
