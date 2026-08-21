@@ -1,6 +1,6 @@
 {
   "name": "dsh-mqtt",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "MQTT protocol driver and agent worker gateway for DeepSeek Harness",
   "type": "module",
   "main": "lib/index.js",
