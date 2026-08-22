@@ -7,7 +7,7 @@ MQTT protocol driver and agent worker gateway for [DeepSeek Harness (DSH)](https
 `dsh-mqtt` turns a DSH process into an MQTT-addressable agent worker. A client can submit work, observe normalized execution events, steer or inject context into a running turn, cancel it, and receive a correlated final result. The DSH host only makes an outbound broker connection, so the worker can stay behind NAT or a firewall without exposing an HTTP server.
 
 > [!IMPORTANT]
-> Version `0.1.5` lets the operator stop a running task, keeps one slow session from stalling the others, and says plainly when controller approval is off. It currently targets DSH `0.1.0-rc.8`. DSH itself is a developer preview and may introduce breaking changes.
+> Version `0.1.6` closes a DNS-rebinding hole in the unauthenticated management API, keeps a live stream instead of polling when a management token is set, and stops a chatty controller from fsyncing the state file once per message. It currently targets DSH `0.1.0-rc.8`. DSH itself is a developer preview and may introduce breaking changes.
 
 ## What it provides
 
@@ -97,7 +97,7 @@ DSH installs plugins into a profile. The `web` profile is convenient for a first
 From npm:
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web add dsh-mqtt@0.1.5
+npx @deepseek-ai/dsh plugin --profile web add dsh-mqtt@0.1.6
 ```
 
 From a local checkout:
@@ -179,7 +179,7 @@ Broker, Agent, model, workspace, and capacity data come from live Gateway checks
 
 The panel speaks English and Chinese. Inside DSH it follows the shell's language; the standalone page picks one up from the browser and offers a switch in its header.
 
-The management server binds to loopback by default. A non-loopback `managementHost` requires `managementToken` or `managementTokenEnv`; the UI asks for that token and keeps it in `sessionStorage` for the current tab only, while API clients send `Authorization: Bearer <token>`. Cross-origin requests are accepted from loopback origins, which is what the DSH panel needs; set `managementCorsOrigin` to name a single exact origin instead. Never expose an unauthenticated management endpoint to a network.
+The management server binds to loopback by default. A non-loopback `managementHost` requires `managementToken` or `managementTokenEnv`; the UI asks for that token and keeps it in `sessionStorage` for the current tab only, while API clients send `Authorization: Bearer <token>`. Cross-origin requests are accepted from loopback origins, which is what the DSH panel needs; set `managementCorsOrigin` to name a single exact origin instead. Without a token, then, any page you open on this machine can drive the API — including a page that resolves its own hostname to loopback, which is why requests arriving under a non-loopback `Host` are refused with 421. Set a management token on a machine where that matters, and never expose an unauthenticated management endpoint to a network.
 
 ### Add a controller
 
@@ -307,7 +307,7 @@ Unknown fields are ignored within protocol version 1. Unknown types and invalid 
 | `timestamp` | yes | RFC 3339 date-time. |
 | `input` | yes | Non-empty instruction sent through `agent.followup()`. |
 | `workspace` | for a new Session unless `defaultWorkspace` is set | Configured alias, never an arbitrary path. |
-| `session_id` | no | Continue a permitted DSH Session. |
+| `session_id` | no | Continue a permitted DSH Session. Cannot be combined with `workspace`: a resumed Session keeps the directory it was created with. |
 | `metadata` | no | Opaque JSON object; size-limited and echoed in `request.accepted`. Do not place secrets in it. |
 
 ### Control
@@ -439,7 +439,7 @@ The gateway publishes retained online status after each successful connection:
   "request_capacity": 16,
   "workspaces": [{ "alias": "repo-foo", "status": "ready" }],
   "controller_auth_required": true,
-  "gateway_version": "0.1.5",
+  "gateway_version": "0.1.6",
   "protocol_version": 1,
   "capabilities": ["coding"],
   "health": [
@@ -451,7 +451,7 @@ The gateway publishes retained online status after each successful connection:
 }
 ```
 
-`state` is one of `starting`, `connecting`, `ready`, `busy`, `degraded`, `offline`, or `stopped`. Controllers must not trust a retained `online: true` forever: when the current time passes `expires_at`, treat the node as stale until a new heartbeat arrives. Presence exposes workspace aliases, never filesystem paths.
+`state` is one of `connecting`, `ready`, `busy`, `degraded`, `offline`, or `stopped`. Controllers must not trust a retained `online: true` forever: when the current time passes `expires_at`, treat the node as stale until a new heartbeat arrives. Presence exposes workspace aliases, never filesystem paths.
 
 It configures a retained offline Last Will on the same topic and explicitly publishes offline status during graceful shutdown. A Last Will timestamp is created when the connection is configured, not when the broker detects the disconnect; use broker receipt time when exact offline timing matters.
 
@@ -666,8 +666,8 @@ pnpm pack
 Releases are tag-driven. Update `package.json` and `CHANGELOG.md`, commit the changes, and push a matching non-prerelease tag:
 
 ```sh
-git tag v0.1.5
-git push origin v0.1.5
+git tag v0.1.6
+git push origin v0.1.6
 ```
 
 The `Release` workflow verifies that the tag matches `package.json`, installs from the frozen lockfile, runs `pnpm check`, publishes the package to npm, and creates a GitHub Release with generated notes. A retry skips npm publication when that exact version already exists. Publishing uses [trusted publishing](https://docs.npmjs.com/trusted-publishers/): the job mints a short-lived OIDC token and trades it for publish rights, so there is no long-lived secret to rotate and every release carries a provenance attestation. This requires a trusted publisher on npmjs.com naming this repository and `release.yml`. The workflow intentionally rejects prerelease tags until a separate prerelease policy is defined. Do not create a tag until the version, changelog, and release contents are ready.

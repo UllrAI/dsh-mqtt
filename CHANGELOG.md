@@ -2,6 +2,32 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.1.6 - 2026-08-22
+
+### Added
+
+- The management API refuses a request that arrived under a hostname it does not answer to. Without a token the API trusts the loopback interface, and a page whose own domain resolves to `127.0.0.1` is same-origin with it after the rebind; the `Host` header is the one part of that setup the attacker cannot forge, so a non-loopback one now answers 421. Deployments that set a management token are unaffected.
+- The web UI trades its token for a stream ticket instead of settling for polling. A token-protected gateway had the ticket endpoint available and never used it, so its panel refreshed every fifteen seconds; the stream now redials with a fresh ticket when it drops, because a spent one would be replayed forever by the browser's own retry.
+- The token prompt says whether the token it has was refused or was never supplied — two situations that had one message between them.
+- Closing the invitation dialog on a config nobody copied asks first. The token is shown exactly once, so a stray Escape used to cost a controller that had to be issued again.
+
+### Changed
+
+- A controller's last-use timestamp is recorded at a resolution of a minute. Authenticating is a read in every practical sense, yet it rewrote and fsynced the whole state file once per MQTT message; a mutation that changes nothing now skips the disk entirely.
+- Controllers are listed newest invite first. Ordering by last update meant a working controller climbed the list on every message and shuffled the rows under the operator's cursor.
+- Buttons show progress on the control that was pressed, rather than greying out every button on the page.
+- Workspace readiness reads for the count at hand: "no workspaces configured" instead of "0 of 0 workspaces ready", and a singular line for a single workspace.
+- `session_id` together with `workspace` is rejected instead of silently ignoring the alias. A resumed session keeps the directory it was created with, so accepting both reported work as having run somewhere it never did.
+
+### Fixed
+
+- The request ledger is capped at 5 000 records. Deduplication TTL alone did not bound it — a busy worker accumulated a week of terminal records, each one rewritten on every mutation — so the least recently updated terminal records are now evicted once the cap is reached.
+- Closing the state store is final. A late mutation could rewrite a file the gateway had already stopped reconciling with the broker.
+- Shutdown waits for the per-session queues to drain before closing the transport, so the last events of a cancelled request still reach the broker.
+- Label/value grids are marked up as description lists. `<dt>` and `<dd>` outside a `<dl>` are invalid, and a screen reader had no pairing to announce.
+- Truncated titles and field values carry the full text as a tooltip, instead of ending at an ellipsis with no way to read the rest.
+- The unreachable `starting` node state is gone from the protocol, both READMEs, and the UI. It could never appear on the wire, and a controller matching on it was writing dead code.
+
 ## 0.1.5 - 2026-08-21
 
 ### Added

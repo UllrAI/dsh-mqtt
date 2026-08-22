@@ -1,3 +1,4 @@
+import { request as httpRequest } from 'node:http'
 import { createServer } from 'node:net'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { resolveConfig } from '../src/config.ts'
@@ -18,6 +19,23 @@ async function freePort(): Promise<number> {
   if (address === null || typeof address === 'string') throw new Error('test server has no port')
   await new Promise<void>(resolve => server.close(() => resolve()))
   return address.port
+}
+
+/**
+ * A request with a `Host` header of our choosing.
+ *
+ * `fetch` derives Host from the URL and refuses to let a caller override it,
+ * which is precisely the header the rebinding guard reads.
+ */
+function statusWithHost(port: number, host: string, headers: Record<string, string> = {}): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const call = httpRequest({ host: '127.0.0.1', port, path: '/api/status', headers: { ...headers, host } }, response => {
+      response.resume()
+      resolve(response.statusCode ?? 0)
+    })
+    call.on('error', reject)
+    call.end()
+  })
 }
 
 function logger(): Logger {
@@ -271,6 +289,45 @@ describe('ManagementServer', () => {
     expect(preflight.status).toBe(204)
     expect(preflight.headers.get('access-control-allow-methods')).toContain('DELETE')
     expect(preflight.headers.get('access-control-allow-headers')).toContain('authorization')
+  })
+
+  it('refuses a request that arrived under a hostname that is not ours', async () => {
+    const port = await freePort()
+    const config = resolveConfig({
+      url: 'mqtt://127.0.0.1:1883',
+      namespace: 'test',
+      nodeId: 'worker',
+      managementPort: port,
+    })
+    const gateway = { getStatus: vi.fn().mockResolvedValue({ state: 'ready' }) } as unknown as MqttAgentGateway
+    const server = new ManagementServer({ gateway, config, logger: logger() })
+    servers.push(server)
+    await server.start()
+
+    // DNS rebinding: the browser resolved an attacker's name to loopback, so it
+    // sends no Origin and reads every answer. The Host header still gives it away.
+    expect(await statusWithHost(port, 'rebind.example.com')).toBe(421)
+    expect(await statusWithHost(port, 'not a host')).toBe(421)
+    expect(await statusWithHost(port, `localhost:${port}`)).toBe(200)
+  })
+
+  it('leaves the Host check to the token when one is configured', async () => {
+    const port = await freePort()
+    const config = resolveConfig({
+      url: 'mqtt://127.0.0.1:1883',
+      namespace: 'test',
+      nodeId: 'worker',
+      managementHost: '0.0.0.0',
+      managementPort: port,
+      managementToken: 'management-secret',
+    })
+    const gateway = { getStatus: vi.fn().mockResolvedValue({ state: 'ready' }) } as unknown as MqttAgentGateway
+    const server = new ManagementServer({ gateway, config, logger: logger() })
+    servers.push(server)
+    await server.start()
+
+    // A non-loopback bind is exactly the deployment that reaches us by name.
+    expect(await statusWithHost(port, 'worker.internal', { authorization: 'Bearer management-secret' })).toBe(200)
   })
 
   it('pushes gateway notices over SSE and stops cleanly with the stream still open', async () => {

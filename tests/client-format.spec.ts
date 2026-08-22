@@ -11,7 +11,7 @@ import {
   nodeStateTone,
   requestStatusLabel,
   requestStatusTone,
-  workspaceReadiness,
+  workspacesLabel,
 } from '../src/client/core/format.ts'
 import { createTranslate, en, interpolate, zh } from '../src/client/core/i18n.ts'
 
@@ -82,12 +82,14 @@ describe('formatting', () => {
     expect(formatTime('not a date', 'en-US', en.noHeartbeat)).toBe(en.noHeartbeat)
   })
 
-  it('reports ready workspaces over the total', () => {
-    expect(workspaceReadiness(undefined)).toEqual({ ready: 0, total: 0 })
-    expect(workspaceReadiness({ workspaces: [] } as never)).toEqual({ ready: 0, total: 0 })
-    expect(workspaceReadiness({
+  it('phrases workspace readiness for the count at hand', () => {
+    expect(workspacesLabel(undefined, t)).toBe(en.workspacesNone)
+    expect(workspacesLabel({ workspaces: [] } as never, t)).toBe(en.workspacesNone)
+    expect(workspacesLabel({ workspaces: [{ alias: 'a', status: 'ready' }] } as never, t))
+      .toBe(interpolate(en.workspacesReadyOne, { ready: 1 }))
+    expect(workspacesLabel({
       workspaces: [{ alias: 'a', status: 'ready' }, { alias: 'b', status: 'missing' }],
-    } as never)).toEqual({ ready: 1, total: 2 })
+    } as never, t)).toBe(interpolate(en.workspacesReady, { ready: 1, total: 2 }))
   })
 
   it('picks the coarsest duration unit that still reads precisely', () => {

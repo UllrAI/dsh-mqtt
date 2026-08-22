@@ -91,6 +91,29 @@ interface StateFile {
  */
 const MAX_SESSIONS = 10_000
 
+/**
+ * Request ledger bound.
+ *
+ * `dedupTtlSeconds` defaults to a week, so time alone does not bound this file:
+ * a busy worker can accumulate far more terminal records than any operator will
+ * ever read before the first one expires. Cap the count too and drop the
+ * least-recently-updated terminal records once it is reached — dedup protection
+ * for a week-old request id matters less than a state file that stays small
+ * enough to rewrite on every mutation.
+ */
+const MAX_REQUESTS = 5_000
+
+/**
+ * How stale `lastUsedAt` may get before it is worth a write.
+ *
+ * Authenticating a controller is a read for every practical purpose, yet the
+ * timestamp turns it into a full rewrite plus fsync of the state file — once per
+ * MQTT message. The value only feeds a "last used" line in the management UI, so
+ * a minute of drift costs nothing and a chatty controller costs one write a
+ * minute instead of one per message.
+ */
+const LAST_USED_RESOLUTION_MS = 60_000
+
 export type ReserveResult =
   | { kind: 'reserved'; record: StoredRequest }
   | { kind: 'duplicate'; record: StoredRequest }
@@ -274,6 +297,8 @@ export class RequestStore {
   private state = emptyState()
   private opened = false
   private queue: Promise<void> = Promise.resolve()
+  /** Bytes of the last successful write; a mutation that changes nothing skips the disk. */
+  private written: string | undefined
 
   constructor(
     private readonly file: string,
@@ -453,9 +478,16 @@ export class RequestStore {
     })
   }
 
+  /**
+   * Controllers, newest invite first.
+   *
+   * Ordered by creation rather than by `updatedAt`: a controller that keeps
+   * working would otherwise climb the list on every authenticated message and
+   * shuffle the rows under the operator's cursor.
+   */
   async listControllers(): Promise<ControllerSummary[]> {
     return this.read(() => Object.values(this.state.controllers ?? {})
-      .sort((left, right) => right.updatedAt - left.updatedAt)
+      .sort((left, right) => right.createdAt - left.createdAt || left.id.localeCompare(right.id))
       .map(controllerSummary))
   }
 
@@ -495,8 +527,13 @@ export class RequestStore {
       if (!controller.scopes.includes(scope) && !controller.scopes.includes('*')) {
         return { ok: false, reason: 'scope-denied' as const }
       }
-      controller.lastUsedAt = this.now()
-      controller.updatedAt = controller.lastUsedAt
+      const now = this.now()
+      // Coarse on purpose; see `LAST_USED_RESOLUTION_MS`. Unchanged state makes
+      // `persist` a no-op, so most authenticated messages never touch the disk.
+      if (controller.lastUsedAt === undefined || now - controller.lastUsedAt >= LAST_USED_RESOLUTION_MS) {
+        controller.lastUsedAt = now
+        controller.updatedAt = now
+      }
       return { ok: true as const, controller: controllerSummary(controller) }
     })
   }
@@ -516,8 +553,16 @@ export class RequestStore {
     })
   }
 
+  /**
+   * Drain in-flight writes and refuse further ones.
+   *
+   * Closing has to be final: a late mutation would rewrite a state file the
+   * gateway has already stopped reconciling with the broker.
+   */
   async close(): Promise<void> {
-    await this.queue
+    const pending = this.queue
+    this.opened = false
+    await pending
   }
 
   private require(id: string): StoredRequest {
@@ -543,6 +588,7 @@ export class RequestStore {
     for (const [id, record] of Object.entries(this.state.requests)) {
       if (isTerminal(record.status) && record.expiresAt <= now) delete this.state.requests[id]
     }
+    this.capRequests()
     // A revoked controller past its expiry can never authenticate again, so the
     // row is dead weight. Pending and authorized ones stay, expired or not: the
     // operator still needs to see and revoke them.
@@ -551,6 +597,23 @@ export class RequestStore {
     for (const [id, controller] of Object.entries(controllers)) {
       if (controller.status === 'revoked' && controller.expiresAt <= now) delete controllers[id]
     }
+  }
+
+  /**
+   * Hold the request ledger at `MAX_REQUESTS`, oldest terminal record first.
+   *
+   * Only terminal records are evictable: a live request still needs its row to
+   * finish. If every record is live the cap is simply not met, which is already
+   * bounded by `maxActiveRequests`.
+   */
+  private capRequests(): void {
+    const ids = Object.keys(this.state.requests)
+    if (ids.length <= MAX_REQUESTS) return
+    const evictable = ids
+      .filter(id => isTerminal((this.state.requests[id] as StoredRequest).status))
+      .sort((left, right) =>
+        (this.state.requests[left] as StoredRequest).updatedAt - (this.state.requests[right] as StoredRequest).updatedAt)
+    for (const id of evictable.slice(0, ids.length - MAX_REQUESTS)) delete this.state.requests[id]
   }
 
   private mutate<T>(operation: () => T | Promise<T>): Promise<T> {
@@ -575,13 +638,16 @@ export class RequestStore {
   }
 
   private async persist(): Promise<void> {
-    const directory = dirname(this.file)
-    await mkdir(directory, { recursive: true, mode: 0o700 })
-    const temporary = join(directory, `.${basename(this.file)}.${process.pid}.${Date.now()}.tmp`)
     // Compact, not pretty-printed: nothing reads this by hand, and every mutation
     // rewrites the whole file. The session ledger is a `Set` in memory, so it is
     // widened to an array here — `JSON.stringify` would otherwise emit `{}`.
     const bytes = `${JSON.stringify({ ...this.state, sessions: [...this.state.sessions] })}\n`
+    // A mutation that changed nothing — a repeated read-shaped authentication,
+    // most of all — is not worth an fsync.
+    if (bytes === this.written) return
+    const directory = dirname(this.file)
+    await mkdir(directory, { recursive: true, mode: 0o700 })
+    const temporary = join(directory, `.${basename(this.file)}.${process.pid}.${Date.now()}.tmp`)
     try {
       // Flush before the rename. The rename is atomic, but without the sync a
       // power loss can leave the replacement empty — and this file is the only
@@ -598,5 +664,6 @@ export class RequestStore {
       await rm(temporary, { force: true }).catch(() => undefined)
       throw new Error(`dsh-mqtt: failed to persist state file ${this.file}`, { cause: error })
     }
+    this.written = bytes
   }
 }

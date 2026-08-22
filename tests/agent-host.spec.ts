@@ -218,6 +218,11 @@ describe('DshAgentHost', () => {
     const fixture = await setup()
     await expect(fixture.host.acquire({ requestId: 'bad', workspace: 'missing' }))
       .rejects.toMatchObject({ code: 'WORKSPACE_NOT_ALLOWED' } satisfies Partial<AgentHostError>)
+    // A resumed session keeps its own directory, so honouring the alias is not
+    // an option — and quietly ignoring it would misreport where the work ran.
+    await expect(fixture.host.acquire({ requestId: 'both', sessionId: 'persisted', workspace: 'app' }))
+      .rejects.toMatchObject({ code: 'WORKSPACE_NOT_APPLICABLE' } satisfies Partial<AgentHostError>)
+    expect(fixture.fake.resume).not.toHaveBeenCalled()
     expect(() => fixture.host.send('missing-session', 'followup', 'input'))
       .toThrowError(expect.objectContaining({ code: 'AGENT_NOT_LIVE' }))
   })

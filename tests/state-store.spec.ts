@@ -142,6 +142,111 @@ describe('RequestStore', () => {
     expect(await readFile(file, 'utf8')).not.toContain(invite.token)
   })
 
+  it('holds the request ledger at its cap by dropping the oldest terminal records', async () => {
+    // Seeded directly: driving 5 000 requests through the API would spend the
+    // whole test budget rewriting the same file.
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-mqtt-store-'))
+    directories.push(directory)
+    const file = join(directory, 'state.json')
+    const requests: Record<string, unknown> = {}
+    for (let index = 0; index < 5_100; index += 1) {
+      const id = `req-${index}`
+      requests[id] = {
+        id,
+        fingerprint: id,
+        status: 'completed',
+        createdAt: index,
+        updatedAt: index,
+        expiresAt: 10_000_000,
+        controls: {},
+        result: protocolResult(id, 'completed', {}),
+      }
+    }
+    await writeFile(file, JSON.stringify({ version: 1, requests, sessions: [] }))
+
+    const store = new RequestStore(file, 60_000, () => 1_000)
+    await store.open()
+    // Any mutation sweeps first; the reservation itself is one more record.
+    await store.reserve('fresh', 'fingerprint')
+
+    // The sweep runs before the operation: 5 100 records, cap 5 000, so the
+    // 100 least recently updated go and the new reservation lands on top.
+    expect(await store.get('req-0')).toBeUndefined()
+    expect(await store.get('req-99')).toBeUndefined()
+    expect(await store.get('req-100')).toBeDefined()
+    expect(await store.get('fresh')).toBeDefined()
+  })
+
+  it('keeps a live request even when the ledger is over its cap', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-mqtt-store-'))
+    directories.push(directory)
+    const file = join(directory, 'state.json')
+    const requests: Record<string, unknown> = {}
+    for (let index = 0; index < 5_001; index += 1) {
+      const id = `req-${index}`
+      requests[id] = {
+        id,
+        fingerprint: id,
+        status: index === 0 ? 'active' : 'completed',
+        createdAt: index,
+        updatedAt: index,
+        expiresAt: 10_000_000,
+        controls: {},
+        ...index === 0 ? {} : { result: protocolResult(id, 'completed', {}) },
+      }
+    }
+    await writeFile(file, JSON.stringify({ version: 1, requests, sessions: [] }))
+
+    const store = new RequestStore(file, 60_000, () => 1_000)
+    await store.open()
+    await store.reserve('fresh', 'fingerprint')
+
+    expect(await store.get('req-0')).toMatchObject({ status: 'active' })
+    expect(await store.get('req-1')).toBeUndefined()
+    expect(await store.get('req-2')).toBeDefined()
+  })
+
+  it('writes a controller\'s last use at most once a minute, and not at all when nothing changed', async () => {
+    let clock = 1_000_000
+    const { store, file } = await fixture(() => clock)
+    const invite = await store.createController('MacBook', ['submit'], 600_000)
+    await store.authorizeController(invite.id)
+    await store.authenticateController(invite.id, invite.token, 'submit')
+    const firstUse = clock
+    const written = await stat(file)
+
+    // A chatty controller must not turn every message into an fsync.
+    clock += 30_000
+    await store.authenticateController(invite.id, invite.token, 'submit')
+    expect((await store.listControllers())[0]?.lastUsedAt).toBe(firstUse)
+    expect((await stat(file)).mtimeMs).toBe(written.mtimeMs)
+
+    clock += 31_000
+    await store.authenticateController(invite.id, invite.token, 'submit')
+    expect((await store.listControllers())[0]?.lastUsedAt).toBe(clock)
+  })
+
+  it('lists controllers newest first, and does not reshuffle them as they are used', async () => {
+    let clock = 1_000
+    const { store } = await fixture(() => clock)
+    const first = await store.createController('First', ['submit'], 600_000)
+    clock += 1_000
+    const second = await store.createController('Second', ['submit'], 600_000)
+    await store.authorizeController(first.id)
+    clock += 120_000
+    await store.authenticateController(first.id, first.token, 'submit')
+
+    expect((await store.listControllers()).map(controller => controller.id)).toEqual([second.id, first.id])
+  })
+
+  it('refuses work once closed', async () => {
+    const { store } = await fixture()
+    await store.close()
+
+    await expect(store.reserve('req-1', 'fingerprint')).rejects.toThrow(/not open/)
+    await expect(store.listControllers()).rejects.toThrow(/not open/)
+  })
+
   it('fails loudly on a corrupt state file', async () => {
     const { file } = await fixture()
     await rm(file)

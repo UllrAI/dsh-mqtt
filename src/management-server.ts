@@ -101,12 +101,44 @@ function writeJson(response: ServerResponse, status: number, value: unknown, ori
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
 
+function hostname(value: string): string | undefined {
+  try {
+    // The scheme is a parsing placeholder; `Host` carries authority only.
+    return new URL(`http://${value}`).hostname
+  } catch {
+    return undefined
+  }
+}
+
 function isLoopbackOrigin(origin: string): boolean {
   try {
     return LOOPBACK_HOSTS.has(new URL(origin).hostname)
   } catch {
     return false
   }
+}
+
+/**
+ * Refuse a request that reached us under someone else's hostname.
+ *
+ * Without a token this API trusts the loopback interface, and a browser can be
+ * pointed at it by resolving an attacker-controlled name to 127.0.0.1. After
+ * that rebinding the attacker's page is same-origin with us, so it sends no
+ * `Origin` and reads every response. The `Host` header still names where the
+ * browser thinks it is going, and it is the only part of that setup the attacker
+ * cannot forge — so a non-loopback `Host` is refused.
+ *
+ * Only unauthenticated deployments need this: a token the attacker does not have
+ * already stops them, and requiring one is exactly how a non-loopback bind is
+ * configured (see `resolveConfig`).
+ */
+function hostDenied(request: IncomingMessage, config: ResolvedConfig): boolean {
+  if (config.managementToken !== undefined) return false
+  const host = request.headers.host
+  // Absent only on HTTP/1.0 clients, which are never the browser this guards.
+  if (host === undefined) return false
+  const name = hostname(host)
+  return name === undefined || !LOOPBACK_HOSTS.has(name)
 }
 
 /**
@@ -251,6 +283,10 @@ export class ManagementServer {
     const { config, gateway } = this.options
     const origin = allowedOrigin(request, config)
     const url = requestPath(request)
+    if (hostDenied(request, config)) {
+      writeJson(response, 421, { error: 'host not allowed' }, undefined)
+      return
+    }
     if (!url.pathname.startsWith('/api/')) {
       await this.serveUi(url.pathname, response, origin)
       return

@@ -5,7 +5,7 @@ import { cleanup, render, screen, waitFor, within } from '@testing-library/react
 import userEvent from '@testing-library/user-event'
 import type { ManagementClient, NodeStatus } from '../src/client/core/api.ts'
 import { ManagementApiError } from '../src/client/core/api.ts'
-import { createTranslate, en } from '../src/client/core/i18n.ts'
+import { createTranslate, en, interpolate } from '../src/client/core/i18n.ts'
 import { WorkerPanel } from '../src/client/ui/WorkerPanel.tsx'
 
 const t = createTranslate('en')
@@ -87,7 +87,7 @@ describe('WorkerPanel', () => {
     expect(await findState(en.stateReady)).toBeDefined()
     expect(screen.getByText('Build worker')).toBeDefined()
     expect(screen.getByText(/1 of 4 task slots in use/)).toBeDefined()
-    expect(screen.getByText(/1 workspaces ready/)).toBeDefined()
+    expect(screen.getByText(new RegExp(interpolate(en.workspacesReadyOne, { ready: 1 })))).toBeDefined()
     expect(screen.getByText('0.1.2')).toBeDefined()
 
     const health = screen.getByRole('list', { name: en.healthTitle })
@@ -392,6 +392,35 @@ describe('WorkerPanel', () => {
     expect(writeText).not.toHaveBeenCalled()
   })
 
+  it('asks before dropping a config the operator never copied', async () => {
+    const createInvite = vi.fn().mockResolvedValue({
+      id: 'c1', name: 'Laptop', token: 'invite-secret', scopes: [], expiresAt: Date.now() + 600_000,
+    })
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } })
+    panel(stubClient({ createInvite }))
+
+    await userEvent.click(await screen.findByRole('button', { name: en.addController }))
+    const dialog = await screen.findByRole('dialog')
+    await userEvent.type(within(dialog).getByRole('textbox'), 'Laptop')
+    await userEvent.click(within(dialog).getByRole('button', { name: en.inviteCreate }))
+    await within(dialog).findByText(en.inviteReady)
+
+    // The token is shown once, so leaving without a copy is a decision, not a slip.
+    await userEvent.click(within(dialog).getByRole('button', { name: en.inviteSaved }))
+    const confirm = await screen.findByRole('dialog')
+    expect(within(confirm).getByText(en.inviteDiscardIntro)).toBeDefined()
+
+    await userEvent.click(within(confirm).getByRole('button', { name: en.cancel }))
+    expect(await screen.findByText(en.inviteReady)).toBeDefined()
+
+    // Once the config is on the clipboard the dialog closes without asking.
+    await userEvent.click(screen.getByRole('button', { name: en.copy }))
+    await waitFor(() => expect(writeText).toHaveBeenCalledOnce())
+    await userEvent.click(screen.getByRole('button', { name: en.inviteSaved }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  })
+
   it('lets the user back out of the invite dialog', async () => {
     const createInvite = vi.fn()
     panel(stubClient({ createInvite }))
@@ -499,6 +528,21 @@ describe('WorkerPanel', () => {
     await userEvent.click(connect)
 
     expect(onToken).toHaveBeenCalledWith('secret')
+  })
+
+  it('separates a refused token from one that was never supplied', async () => {
+    const unauthorized = (): Promise<never> =>
+      Promise.reject(new ManagementApiError('management authorization required', 401))
+    panel(stubClient({
+      token: 'wrong-secret',
+      status: vi.fn().mockImplementation(unauthorized),
+      config: vi.fn().mockImplementation(unauthorized),
+      controllers: vi.fn().mockImplementation(unauthorized),
+      requests: vi.fn().mockImplementation(unauthorized),
+    }))
+
+    expect(await screen.findByText(en.tokenRejected)).toBeDefined()
+    expect(screen.queryByText(en.tokenHint)).toBeNull()
   })
 
   it('offers a retry when the gateway is unreachable', async () => {

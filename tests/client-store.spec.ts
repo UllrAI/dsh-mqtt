@@ -47,6 +47,7 @@ function stubClient(overrides: Partial<Record<keyof ManagementClient, unknown>> 
     config: vi.fn().mockResolvedValue({ namespace: 'ns' }),
     controllers: vi.fn().mockResolvedValue([{ id: 'c1' }]),
     requests: vi.fn().mockResolvedValue([{ id: 'r1' }]),
+    streamTicket: vi.fn().mockResolvedValue('ticket-1'),
     ...overrides,
   } as unknown as ManagementClient
 }
@@ -133,8 +134,22 @@ describe('ManagementStore', () => {
     store.start()
     await settle()
 
-    expect(store.getState()).toMatchObject({ authRequired: true, error: undefined, live: false })
+    expect(store.getState()).toMatchObject({ authRequired: true, tokenRejected: false, error: undefined, live: false })
     expect(FakeEventSource.instances[0]?.closed).toBe(true)
+  })
+
+  it('says the token was wrong only when one was actually sent', async () => {
+    const store = createStore(stubClient({
+      token: 'secret',
+      status: vi.fn().mockRejectedValue(new ManagementApiError('unauthorized', 401)),
+    }))
+    store.start()
+    await settle()
+
+    expect(store.getState()).toMatchObject({ authRequired: true, tokenRejected: true })
+
+    store.retry()
+    expect(store.getState()).toMatchObject({ authRequired: false, tokenRejected: false })
   })
 
   it('drops subscribers on unsubscribe', async () => {
@@ -308,12 +323,39 @@ describe('ManagementStore', () => {
     expect(store.getState().live).toBe(false)
   })
 
-  it('stays on polling when a token is configured, because EventSource cannot send headers', async () => {
+  it('carries a ticket in the query string when a token is configured', async () => {
+    // EventSource cannot send an Authorization header, so the token is traded
+    // for a single-use ticket the gateway accepts on the URL.
     const store = createStore(stubClient({ token: 'secret' }))
     store.start()
     await settle()
 
+    expect(FakeEventSource.instances[0]?.url).toBe('http://gateway.test/api/stream?ticket=ticket-1')
+  })
+
+  it('redials with a fresh ticket when a ticketed stream drops', async () => {
+    vi.useFakeTimers()
+    const streamTicket = vi.fn().mockResolvedValueOnce('ticket-1').mockResolvedValue('ticket-2')
+    const store = createStore(stubClient({ token: 'secret', streamTicket }))
+    store.start()
+    await settle()
+
+    // The spent ticket would be replayed forever by the browser's own retry.
+    FakeEventSource.instances[0]?.onerror?.()
+    expect(FakeEventSource.instances[0]?.closed).toBe(true)
+    await vi.advanceTimersByTimeAsync(3_000)
+    await settle()
+
+    expect(FakeEventSource.instances[1]?.url).toBe('http://gateway.test/api/stream?ticket=ticket-2')
+  })
+
+  it('leaves the stream closed when the ticket cannot be issued', async () => {
+    const store = createStore(stubClient({ token: 'secret', streamTicket: vi.fn().mockRejectedValue(new Error('no')) }))
+    store.start()
+    await settle()
+
     expect(FakeEventSource.instances).toHaveLength(0)
+    expect(store.getState().live).toBe(false)
   })
 
   it('survives an EventSource constructor that throws', async () => {
