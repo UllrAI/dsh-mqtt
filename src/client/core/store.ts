@@ -23,6 +23,8 @@ export interface ManagementState {
   requests: RequestRecord[]
   /** Set when the gateway demands a bearer token we do not have. */
   authRequired: boolean
+  /** Set when the token we do have was refused, rather than never supplied. */
+  tokenRejected: boolean
   /** Last transport or server error, cleared on the next success. */
   error: string | undefined
   loading: boolean
@@ -36,12 +38,21 @@ export const INITIAL_STATE: ManagementState = {
   controllers: [],
   requests: [],
   authRequired: false,
+  tokenRejected: false,
   error: undefined,
   loading: true,
   live: false,
 }
 
 const POLL_INTERVAL_MS = 15_000
+/**
+ * Gap before a spent-ticket stream is dialled again.
+ *
+ * Long enough that a gateway which keeps refusing is not hammered, short enough
+ * that a restart is picked up before the operator reaches for Refresh. Polling
+ * covers the gap either way.
+ */
+const STREAM_RETRY_MS = 3_000
 /**
  * Shortest gap between stream-driven reloads.
  *
@@ -113,6 +124,8 @@ export class ManagementStore {
   private source: EventSource | undefined
   private timer: ReturnType<typeof setInterval> | undefined
   private coalesceTimer: ReturnType<typeof setTimeout> | undefined
+  private streamTimer: ReturnType<typeof setTimeout> | undefined
+  private opening = false
   private started = false
   private disposed = false
 
@@ -136,7 +149,7 @@ export class ManagementStore {
     if (this.started || this.disposed) return
     this.started = true
     void this.refresh()
-    this.openStream()
+    void this.openStream()
     this.timer = setInterval(() => void this.refresh(), POLL_INTERVAL_MS)
   }
 
@@ -148,15 +161,17 @@ export class ManagementStore {
     this.timer = undefined
     if (this.coalesceTimer !== undefined) clearTimeout(this.coalesceTimer)
     this.coalesceTimer = undefined
+    if (this.streamTimer !== undefined) clearTimeout(this.streamTimer)
+    this.streamTimer = undefined
     this.listeners.clear()
   }
 
   /** Retry after the user supplies a token or asks to reconnect. */
   retry(): void {
     if (this.disposed) return
-    this.patch({ authRequired: false, error: undefined })
+    this.patch({ authRequired: false, tokenRejected: false, error: undefined })
     void this.refresh()
-    if (this.source === undefined) this.openStream()
+    if (this.source === undefined) void this.openStream()
   }
 
   /**
@@ -164,9 +179,12 @@ export class ManagementStore {
    *
    * A 401 anywhere means the gateway wants a token: stop the stream and the
    * poll rather than hammering it, and surface the prompt instead of an error.
+   * Whether we had sent one decides what the prompt says — "supply a token" and
+   * "that token is wrong" are different instructions to the operator.
    */
   async refresh(): Promise<void> {
     if (this.disposed) return
+    const sentToken = this.client.token !== undefined
     const [status, config, controllers, requests] = await Promise.allSettled([
       this.client.status(),
       this.client.config(),
@@ -181,7 +199,7 @@ export class ManagementStore {
 
     if (failures.some(error => error instanceof ManagementApiError && error.status === 401)) {
       this.closeStream()
-      this.patch({ authRequired: true, loading: false, live: false, error: undefined })
+      this.patch({ authRequired: true, tokenRejected: sentToken, loading: false, live: false, error: undefined })
       return
     }
 
@@ -192,6 +210,7 @@ export class ManagementStore {
       ...controllers.status === 'fulfilled' ? { controllers: controllers.value } : {},
       ...requests.status === 'fulfilled' ? { requests: requests.value } : {},
       authRequired: false,
+      tokenRejected: false,
       loading: false,
       error: firstFailure === undefined
         ? undefined
@@ -199,26 +218,54 @@ export class ManagementStore {
     })
   }
 
-  private openStream(): void {
-    if (this.source !== undefined || typeof EventSource === 'undefined') return
-    const token = this.client.token
-    // EventSource cannot set headers; a token-protected gateway stays on polling.
-    if (token !== undefined) return
-    let source: EventSource
+  /**
+   * Open the live stream, buying a ticket first when a token is in play.
+   *
+   * `EventSource` cannot carry an Authorization header, so a token-protected
+   * gateway would be stuck on polling. A single-use ticket in the query string
+   * closes that gap without putting the token itself in a URL. If the ticket
+   * cannot be had — an old gateway, a refused token — polling stays in charge.
+   */
+  private async openStream(): Promise<void> {
+    if (this.source !== undefined || this.opening || typeof EventSource === 'undefined') return
+    this.opening = true
     try {
-      source = new EventSource(`${this.client.baseUrl}/stream`)
-    } catch {
-      return
+      let url = `${this.client.baseUrl}/stream`
+      if (this.client.token !== undefined) {
+        const ticket = await this.client.streamTicket().catch(() => undefined)
+        if (ticket === undefined || this.disposed || this.source !== undefined) return
+        url += `?ticket=${encodeURIComponent(ticket)}`
+      }
+      let source: EventSource
+      try {
+        source = new EventSource(url)
+      } catch {
+        return
+      }
+      this.source = source
+      source.onopen = () => this.patch({ live: true })
+      source.addEventListener('status', message => this.consume('status', message))
+      source.addEventListener('result', message => this.consume('result', message))
+      source.addEventListener('event', message => this.consume('event', message))
+      source.onerror = () => {
+        this.patch({ live: false })
+        // A ticket is spent on connect, so the browser's own reconnect would
+        // replay a dead query string forever. Redial with a fresh one instead;
+        // an unticketed stream is left to the browser as before.
+        if (this.client.token !== undefined) this.reopenStream()
+      }
+    } finally {
+      this.opening = false
     }
-    this.source = source
-    source.onopen = () => this.patch({ live: true })
-    source.addEventListener('status', message => this.consume('status', message))
-    source.addEventListener('result', message => this.consume('result', message))
-    source.addEventListener('event', message => this.consume('event', message))
-    source.onerror = () => {
-      // The browser reconnects on its own; polling covers the gap meanwhile.
-      this.patch({ live: false })
-    }
+  }
+
+  private reopenStream(): void {
+    if (this.disposed || this.streamTimer !== undefined) return
+    this.closeStream()
+    this.streamTimer = setTimeout(() => {
+      this.streamTimer = undefined
+      void this.openStream()
+    }, STREAM_RETRY_MS)
   }
 
   /**

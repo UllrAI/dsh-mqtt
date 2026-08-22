@@ -24,7 +24,7 @@ const SUMMARY_LIMIT = 8_000
 /** Chain key for work that is not tied to one session; see `enqueue`. */
 const SHARED_CHAIN = '@shared'
 
-export type NodeState = 'starting' | 'connecting' | 'ready' | 'busy' | 'degraded' | 'offline' | 'stopped'
+export type NodeState = 'connecting' | 'ready' | 'busy' | 'degraded' | 'offline' | 'stopped'
 
 export interface NodeHealthCheck {
   name: string
@@ -151,7 +151,6 @@ export class MqttAgentGateway {
   private readonly chains = new Map<string, Promise<void>>()
   private stopping = false
   private connectionState: TransportState = 'offline'
-  private nodeState: NodeState = 'starting'
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined
   private readonly noticeListeners = new Set<GatewayNoticeListener>()
 
@@ -193,9 +192,6 @@ export class MqttAgentGateway {
         onState: state => this.enqueue(async () => {
           if (this.stopping) return
           this.connectionState = state
-          if (state === 'connecting') this.nodeState = 'connecting'
-          if (state === 'degraded') this.nodeState = 'degraded'
-          if (state === 'offline') this.nodeState = 'offline'
           if (state === 'offline') await this.publishOfflineStatus()
           else if (state === 'degraded') await this.publishOnlineStatus()
         }),
@@ -237,6 +233,10 @@ export class MqttAgentGateway {
         }))
       }
     })
+    // Only the shared chain has been awaited. A session chain can still be
+    // mid-publish with an event enqueued before `stopping` flipped, and closing
+    // the transport under it would lose that publish and log a failure for it.
+    await this.whenIdle()
     await this.publishOfflineStatus().catch(error => this.logger.warn('dsh-mqtt: failed to publish offline status', error))
     const results = await Promise.allSettled([this.host.dispose(), this.transport.stop(), this.store.close()])
     const failures = results
@@ -360,11 +360,12 @@ export class MqttAgentGateway {
   /**
    * Serialize gateway work, per chain.
    *
-   * Broker publishes are QoS 1 awaits, so one shared chain lets a slow ack for
-   * one session stall every other session's events. Work for a session goes on
-   * its own chain — ordering within a session still holds, which is what
-   * consumers rely on — while unkeyed work (submits, control, status) stays on
-   * the shared chain, where mutual exclusion over `active` is load-bearing.
+   * Ordering is the point, not throughput: a session's events have to reach the
+   * broker in the order the agent produced them, and the submit/control path has
+   * to hold mutual exclusion over `active` so two messages cannot both decide a
+   * request is free to start. Splitting by session keeps one slow agent handler
+   * from delaying another session's events, while unkeyed work (submits,
+   * control, status) shares one chain, where that mutual exclusion lives.
    */
   private enqueue(operation: () => void | Promise<void>, key = SHARED_CHAIN): Promise<void> {
     const chain = (this.chains.get(key) ?? Promise.resolve()).then(operation).catch(error => {
@@ -704,6 +705,15 @@ export class MqttAgentGateway {
     await this.publishResult(protocolErrorResult(error, id))
   }
 
+  /**
+   * Publish one request event.
+   *
+   * Unlike `publishOnlineStatus` this has no connection guard, on purpose: an
+   * event is a point in a request's history that nothing later repeats, so it is
+   * handed to mqtt.js even while offline and delivered on reconnect. Status is
+   * retained and each publish supersedes the last, which is why dropping one
+   * mid-outage costs nothing there.
+   */
   private async publishEvent(id: string, type: string, data?: unknown, sequence?: number): Promise<void> {
     const event = protocolEvent(id, type, data, sequence)
     this.notify({ kind: 'event', event })
@@ -723,7 +733,6 @@ export class MqttAgentGateway {
   }
 
   private async publishOfflineStatus(): Promise<void> {
-    this.nodeState = 'offline'
     if (this.connectionState !== 'connected' && !this.stopping) return
     const status = await this.buildStatus()
     this.notify({ kind: 'status', status })
@@ -758,7 +767,7 @@ export class MqttAgentGateway {
     }
     const activeRequests = this.active.size
     const allReady = this.connectionState === 'connected' && health.every(item => item.status === 'ready')
-    this.nodeState = this.stopping
+    const state: NodeState = this.stopping
       ? 'stopped'
       : this.connectionState !== 'connected'
         ? this.connectionState === 'offline' ? 'offline' : this.connectionState === 'connecting' ? 'connecting' : 'degraded'
@@ -772,8 +781,8 @@ export class MqttAgentGateway {
       expires_at: new Date(now.getTime() + this.config.heartbeatSeconds * 2_000).toISOString(),
       node_id: this.config.nodeId,
       display_name: this.config.displayName,
-      state: this.nodeState,
-      online: this.nodeState === 'ready' || this.nodeState === 'busy' || this.nodeState === 'degraded',
+      state,
+      online: state === 'ready' || state === 'busy' || state === 'degraded',
       gateway_version: GATEWAY_VERSION,
       protocol_version: 1,
       capabilities: this.config.capabilities,

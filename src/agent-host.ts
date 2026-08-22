@@ -42,6 +42,7 @@ export interface AgentHostHandlers {
 export interface AcquireAgentOptions {
   requestId: string
   sessionId?: string
+  /** Only meaningful for a new session; a resumed one keeps its own directory. */
   workspace?: string
 }
 
@@ -135,6 +136,12 @@ export class DshAgentHost implements GatewayAgentHost {
   async acquire(options: AcquireAgentOptions): Promise<AgentLease> {
     this.assertStarted()
     const requestedSessionId = options.sessionId
+    // A resumed session keeps the working directory it was created with — there
+    // is nothing to point elsewhere. Silently ignoring the alias would let a
+    // controller believe its request ran somewhere it never did, so say no.
+    if (requestedSessionId !== undefined && options.workspace !== undefined) {
+      throw new AgentHostError('WORKSPACE_NOT_APPLICABLE', 'workspace cannot be set when resuming a session', false)
+    }
     const sessionId = requestedSessionId ?? `mqtt-${randomUUID()}`
     const id = SessionId(sessionId)
     const existing = this.ctx.agents.get(id)

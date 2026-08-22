@@ -29,11 +29,16 @@ export function Section({ title, count, action, children }: {
   )
 }
 
+/** A label/value grid. `<dl>` because `<dt>`/`<dd>` are only valid inside one. */
+export function Fields({ children }: { children?: ReactNode }): JSX.Element {
+  return <dl className="dsh-mqtt-fields">{children}</dl>
+}
+
 export function Field({ label, value }: { label: string; value: string }): JSX.Element {
   return (
     <div className="dsh-mqtt-field">
       <dt>{label}</dt>
-      <dd>{value}</dd>
+      <dd title={value}>{value}</dd>
     </div>
   )
 }
@@ -49,8 +54,10 @@ export function Row({ title, subtitle, tone, actions, mono }: {
     <li className="dsh-mqtt-row">
       <StateDot state={tone} size={8} />
       <div className="dsh-mqtt-grow">
-        <p className={mono === true ? 'dsh-mqtt-mono' : undefined}>{title}</p>
-        <p className="dsh-mqtt-muted">{subtitle}</p>
+        {/* Both lines are clipped to one line, so the full text has to stay
+            reachable on hover. */}
+        <p className={mono === true ? 'dsh-mqtt-mono' : undefined} title={title}>{title}</p>
+        <p className="dsh-mqtt-muted" title={subtitle}>{subtitle}</p>
       </div>
       {actions !== undefined && <div className="dsh-mqtt-actions">{actions}</div>}
     </li>

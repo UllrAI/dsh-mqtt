@@ -6,7 +6,6 @@ import type { Dictionary, Translate } from './i18n.ts'
 import type { NodeStatus, RequestRecord } from './api.ts'
 
 const NODE_STATE_KEYS: Record<string, keyof Dictionary> = {
-  starting: 'stateStarting',
   connecting: 'stateConnecting',
   ready: 'stateReady',
   busy: 'stateBusy',
@@ -118,9 +117,22 @@ export function formatClock(value: number | string, locale: string): string {
 }
 
 /** Ready count over total, so "2" cannot be mistaken for "all of them". */
-export function workspaceReadiness(status: NodeStatus | undefined): { ready: number; total: number } {
+function workspaceReadiness(status: NodeStatus | undefined): { ready: number; total: number } {
   const workspaces = status?.workspaces ?? []
   return { ready: workspaces.filter(workspace => workspace.status === 'ready').length, total: workspaces.length }
+}
+
+/**
+ * How many workspaces are usable, phrased for the count at hand.
+ *
+ * "1 of 1 workspaces ready" reads like a template that never got filled in, and
+ * "0 of 0" says nothing at all — a worker with no workspaces should say so.
+ */
+export function workspacesLabel(status: NodeStatus | undefined, t: Translate): string {
+  const { ready, total } = workspaceReadiness(status)
+  if (total === 0) return t('workspacesNone')
+  if (total === 1) return t('workspacesReadyOne', { ready })
+  return t('workspacesReady', { ready, total })
 }
 
 /** Elapsed time in the coarsest unit that still reads precisely. */

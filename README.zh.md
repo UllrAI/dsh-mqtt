@@ -7,7 +7,7 @@
 `dsh-mqtt` 可以把一个 DSH 进程变成可通过 MQTT 寻址的 Agent Worker。客户端能够提交任务、观察规范化后的执行事件、对正在运行的回合执行 steer 或 inject、取消任务，并取得有关联 ID 的最终结果。DSH 主机只需主动连接 Broker，因此即使 Worker 位于 NAT 或防火墙之后，也不必对外暴露 HTTP Server。
 
 > [!IMPORTANT]
-> `0.1.5` 支持在界面上停止正在运行的任务，让某个慢会话不再拖住其他会话，并在控制端审批关闭时给出明确提示，目前适配 DSH `0.1.0-rc.8`。DSH 本身仍处于 developer preview 阶段，后续可能有破坏性变更。
+> `0.1.6` 修补了未认证管理接口的 DNS rebinding 风险，设置管理 token 后不再退化为轮询，并让频繁通信的控制端不再每条消息都触发一次状态文件落盘，目前适配 DSH `0.1.0-rc.8`。DSH 本身仍处于 developer preview 阶段，后续可能有破坏性变更。
 
 ## 已实现能力
 
@@ -97,7 +97,7 @@ DSH 按 profile 安装插件。第一次使用建议装到 `web` profile，这�
 从 npm 安装：
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web add dsh-mqtt@0.1.5
+npx @deepseek-ai/dsh plugin --profile web add dsh-mqtt@0.1.6
 ```
 
 从本地源码安装：
@@ -179,7 +179,7 @@ http://127.0.0.1:3210/
 
 面板支持中英文。在 DSH 内跟随 DSH 的语言设置；独立页面会读取浏览器语言，也可以在页头随时切换。
 
-管理服务默认只绑定 loopback。若把 `managementHost` 设置为 `0.0.0.0` 或其他非本机地址，必须同时设置 `managementToken` 或 `managementTokenEnv`；界面会要求输入 token，并且只在当前标签页的 `sessionStorage` 中保存，API 调用则需发送 `Authorization: Bearer <token>`。跨域请求默认放行本机来源，这正是 DSH 面板所需；也可以设置 `managementCorsOrigin` 指定唯一的精确来源。不要把未认证的管理端口暴露到局域网或互联网。
+管理服务默认只绑定 loopback。若把 `managementHost` 设置为 `0.0.0.0` 或其他非本机地址，必须同时设置 `managementToken` 或 `managementTokenEnv`；界面会要求输入 token，并且只在当前标签页的 `sessionStorage` 中保存，API 调用则需发送 `Authorization: Bearer <token>`。跨域请求默认放行本机来源，这正是 DSH 面板所需；也可以设置 `managementCorsOrigin` 指定唯一的精确来源。因此在未设置 token 时，本机上的任何页面都能操作该 API——包括把自己的域名解析到 loopback 的页面，所以 `Host` 不是本机地址的请求会被 421 拒绝。若这台机器上还跑着别的网页，请设置管理 token；也不要把未认证的管理端口暴露到局域网或互联网。
 
 ### 添加控制端
 
@@ -307,7 +307,7 @@ dsh/v1/{namespace}/nodes/{nodeId}/status
 | `timestamp` | 是 | RFC 3339 date-time。 |
 | `input` | 是 | 通过 `agent.followup()` 发送的非空指令。 |
 | `workspace` | 新 Session 必填；配置 `defaultWorkspace` 后可省略 | 已配置的目录别名，不是任意路径。 |
-| `session_id` | 否 | 续接一个被允许的 DSH Session。 |
+| `session_id` | 否 | 续接一个被允许的 DSH Session。不能与 `workspace` 同时使用：续接的 Session 仍在它创建时的目录下运行。 |
 | `metadata` | 否 | 有大小限制的任意 JSON object；会原样出现在 `request.accepted` 中，请勿放入秘密。 |
 
 ### 控制请求
@@ -439,7 +439,7 @@ dsh/v1/{namespace}/nodes/{nodeId}/status
   "request_capacity": 16,
   "workspaces": [{ "alias": "repo-foo", "status": "ready" }],
   "controller_auth_required": true,
-  "gateway_version": "0.1.5",
+  "gateway_version": "0.1.6",
   "protocol_version": 1,
   "capabilities": ["coding"],
   "health": [
@@ -451,7 +451,7 @@ dsh/v1/{namespace}/nodes/{nodeId}/status
 }
 ```
 
-`state` 可能为 `starting`、`connecting`、`ready`、`busy`、`degraded`、`offline` 或 `stopped`。Controller 不应只看 retained `online: true`；当前时间超过 `expires_at` 时应将节点视为 stale，等待下一次心跳。状态只暴露工作区别名，不暴露真实路径。
+`state` 可能为 `connecting`、`ready`、`busy`、`degraded`、`offline` 或 `stopped`。Controller 不应只看 retained `online: true`；当前时间超过 `expires_at` 时应将节点视为 stale，等待下一次心跳。状态只暴露工作区别名，不暴露真实路径。
 
 网关会在同一 Topic 配置 retained 离线 Last Will，并在正常关闭时主动发布离线状态。Last Will 的时间戳在建立连接配置时生成，不是 Broker 检测到断线的时刻；需要精确离线时间时，应使用 Broker 接收时间。
 
@@ -666,8 +666,8 @@ pnpm pack
 发布由 Git tag 驱动。先更新 `package.json` 和 `CHANGELOG.md`，提交后推送与版本一致的正式 tag：
 
 ```sh
-git tag v0.1.5
-git push origin v0.1.5
+git tag v0.1.6
+git push origin v0.1.6
 ```
 
 `Release` 工作流会校验 tag 是否与 `package.json` 一致，使用锁文件安装依赖，运行完整的 `pnpm check`，发布 npm 包，并创建带自动生成说明的 GitHub Release；若重试时该版本已经存在于 npm，则会跳过重复发布。发布走 [trusted publishing](https://docs.npmjs.com/trusted-publishers/)：任务临时申请一个 OIDC token 换取发布权限，因此不存在需要定期轮换的长期密钥，每次发布还会附带 provenance 签名。这需要事先在 npmjs.com 上为本包配置 trusted publisher，指向本仓库的 `release.yml`。在单独定义预发布策略前，工作流会拒绝预发布 tag。只有版本号、变更日志和发布内容都准备好后，才应创建 tag。

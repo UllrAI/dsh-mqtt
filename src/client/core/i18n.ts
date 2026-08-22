@@ -10,7 +10,6 @@ export const en = {
   title: 'MQTT Worker',
   subtitle: 'Accept coding tasks over MQTT and manage who may send them.',
 
-  stateStarting: 'Starting',
   stateConnecting: 'Connecting to broker',
   stateReady: 'Ready',
   stateBusy: 'Running a task',
@@ -57,7 +56,6 @@ export const en = {
 
   controllersTitle: 'Controllers',
   controllersEmpty: 'No controllers yet. Add one to let a machine send tasks to this worker.',
-  pendingTitle: 'Waiting for approval',
   pendingCount: '{count} waiting for approval',
   approve: 'Approve',
   reject: 'Reject',
@@ -106,7 +104,6 @@ export const en = {
   inviteExpiry: 'Expires at {time}.',
   inviteOnce: 'The token is shown only now. Copy the config before you close this.',
   inviteApproveHint: 'Approving now saves the controller a second trip here.',
-  inviteApprove: 'Copy and approve',
   inviteSaved: 'I saved it',
   inviteDiscard: 'Close without copying?',
   inviteDiscardIntro: 'The token cannot be shown again. The controller would need a new config.',
@@ -140,7 +137,6 @@ export const zh: Dictionary = {
   title: 'MQTT Worker',
   subtitle: '通过 MQTT 接收编码任务，并管理谁可以提交。',
 
-  stateStarting: '正在启动',
   stateConnecting: '正在连接 Broker',
   stateReady: '就绪',
   stateBusy: '正在执行任务',
@@ -187,7 +183,6 @@ export const zh: Dictionary = {
 
   controllersTitle: '控制端',
   controllersEmpty: '还没有控制端。添加一个，就能让某台机器向这个 Worker 派任务。',
-  pendingTitle: '等待确认',
   pendingCount: '{count} 个等待确认',
   approve: '通过',
   reject: '拒绝',
@@ -236,7 +231,6 @@ export const zh: Dictionary = {
   inviteExpiry: '将于 {time} 失效。',
   inviteOnce: '令牌只在此刻显示一次，关闭前请先复制配置。',
   inviteApproveHint: '现在就通过，控制端不必再回到这里一趟。',
-  inviteApprove: '复制并通过',
   inviteSaved: '我已保存',
   inviteDiscard: '未复制就关闭？',
   inviteDiscardIntro: '令牌无法再次显示，控制端只能重新生成一份配置。',
