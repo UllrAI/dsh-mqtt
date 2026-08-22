@@ -61,9 +61,11 @@ export function WorkerPanel({ client, t, locale, onToken, headerAction }: Worker
   }, [])
 
   /**
-   * One action at a time, but only the invoked control shows it. `key` identifies
-   * the control so a row's own button reports progress instead of the whole panel
-   * greying out.
+   * Run one control's action, reporting progress on that control alone.
+   *
+   * `key` names the control — `cancel:<request id>`, say — so a row's own button
+   * is the thing that goes busy, instead of the whole panel greying out while an
+   * unrelated request is stopped.
    */
   const run = useCallback(async (key: string, action: () => Promise<void>, success?: string) => {
     setPendingAction(key)
@@ -422,7 +424,6 @@ export function WorkerPanel({ client, t, locale, onToken, headerAction }: Worker
             <Button
               variant="primary"
               className="dsh-mqtt-danger"
-              disabled={pendingAction !== undefined}
               onClick={() => {
                 if (revoking === undefined) return
                 const { id } = revoking
