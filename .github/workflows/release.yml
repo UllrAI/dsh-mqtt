@@ -19,7 +19,7 @@ jobs:
     name: Verify, publish, and release
     runs-on: ubuntu-latest
     env:
-      NODE_VERSION: 24.18.1
+      NODE_VERSION: 24.22.1
     steps:
       - name: Check out tagged source
         uses: actions/checkout@v5
